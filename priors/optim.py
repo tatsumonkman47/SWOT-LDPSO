@@ -9,7 +9,7 @@ from jax import Array
 from typing import *
 
 
-class Adam(inox.Namespace):
+class Adam(inox.tree.Namespace):
     def __init__(
         self,
         steps: int,
@@ -66,7 +66,7 @@ class Adam(inox.Namespace):
         return self.transform.update(*args, **kwargs)
 
 
-class EMA(inox.Namespace):
+class EMA(inox.tree.Namespace):
     def __init__(self, decay: float = 0.999):
         self.alpha = 1.0 - decay
 

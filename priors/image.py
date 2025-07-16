@@ -28,32 +28,51 @@ def from_pil(img: Image.Image) -> Array:
 
 
 def to_pil(
-    x: Array,
+    x: np.ndarray,
     pad: int = 0,
     background: int = 255,
     zoom: int = 1,
     file: Union[str, Path] = None,
 ) -> Image.Image:
+    """
+    Convert a batched grid of images into a single PIL Image.
+
+    x: Array of shape (M, N, H, W, C)
+       where:
+         M: rows in grid
+         N: cols in grid
+         H: height
+         W: width
+         C: channels (1 or 3)
+    """
     x = np.asarray(x)
+    # Scale to uint8
     x = np.clip((x + 2) * (256 / 4), 0, 255)
     x = np.rint(x).astype(np.uint8)
-    x = np.tile(x, (1, 1, 1, 1, 1))
-    x = np.pad(x, pad_width=((0, 0), (0, 0), (pad, pad), (pad, pad), (0, 0)), constant_values=background)
+    # Pad
+    x = np.pad(
+        x,
+        pad_width=((0,0), (0,0), (pad,pad), (pad,pad), (0,0)),
+        constant_values=background
+    )
+    # Rearrange grid to single large image
     x = rearrange(x, 'M N H W C -> (M H) (N W) C')
-
+    # Handle single-channel (grayscale) or multi-channel
     if x.shape[-1] == 1:
-        x = Image.fromarray(x.squeeze(-1), mode='L')
+        img = Image.fromarray(x.squeeze(-1), mode='L')
+    elif x.shape[-1] == 3:
+        img = Image.fromarray(x, mode='RGB')
     else:
-        x = Image.fromarray(x, mode='RGB')
-
+        raise ValueError(f"Unsupported number of channels: {x.shape[-1]}")
+    # Resize (zoom)
     if zoom > 1:
-        x = x.resize((zoom * x.width, zoom * x.height), Image.NEAREST)
-
+        img = img.resize(
+            (zoom * img.width, zoom * img.height),
+            Image.NEAREST
+        )
     if file is not None:
-        x.save(file)
-
-    return x
-
+        img.save(file)
+    return img
 
 def collate(
     images: List[List[Image.Image]],
