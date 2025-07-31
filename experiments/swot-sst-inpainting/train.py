@@ -394,7 +394,7 @@ if __name__ == '__main__':
                 ram='128GB',
                 time='1-00:00:00',
                 partition='h200',
-                wrap="hostname && sleep infinity"
+                wrap='\"hostname && sleep infinity\"'
                 
                 
            )
