@@ -21,9 +21,10 @@ data:
   in_transform_list: ["std_global_mean_sst_norm"]
   out_transform_list: ["None"]
   mean_ssh: 0
-  std_ssh: 0.0453692672359483
+  std_ssh: 0.1
   mean_sst: 15.956900367755182
-  std_sst: 5.987649544923141
+  extra_mean_tuning: 1.5
+  std_sst: 5.5
   N_t: 1
   timesteps_range: [30, 360, 5] # [start, stop, step]
   batch_size: 200

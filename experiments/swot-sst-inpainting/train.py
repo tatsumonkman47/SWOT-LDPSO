@@ -12,7 +12,7 @@ import wandb                 # Weights and Biases for experiment tracking
 from datasets import Array3D, Features #load_from_disk
 import sys
 sys.path.append('./')
-import JAXdata_loaders
+import JAXdata_loaders_seasonal
 
 # Workflow management
 from dawgz import job, schedule
@@ -68,6 +68,7 @@ DATA_CONFIG = {
     "return_meta_data": False,
     "cloud_rho": 0.5,
 }
+
 PATCH_COORDS = f"{DATA_CONFIG['data_dir']}/zarred_UVSST_x_y_coordinates_noland_nonan.npy",
 T_RANGE = range(5, 360, 5)
 SPLIT_FRACTIONS = {"train": 0.75, "val":0.15, "test":0.1}
@@ -100,7 +101,7 @@ def generate_custom(model, dataset, rng, batch_size, **kwargs):
                 x = np.stack([self[i]['x'] for i in idx])
                 return {'x': x}
             return {'x': self.x_data[idx]}
-    return JAXdata_loaders.Hugging_face_wrapper(GeneratedDataset(x_full))
+    return JAXdata_loaders_seasonal.Hugging_face_wrapper(GeneratedDataset(x_full))
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 """ Old method
@@ -161,7 +162,7 @@ def train(runid: int, lap: int):
     
     #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     # Load HuggingFace-formatted LLC4320 dataset
-    dataset = JAXdata_loaders.JAXLLC4320_HFformated_dataset(
+    dataset = JAXdata_loaders_seasonal.JAXLLC4320_HFformated_dataset(
             patch_coords=f"{config['data_dir']}/zarred_UVSST_x_y_coordinates_noland_nonan.npy",
             t_range=range(5, 360, 5),
             split_fractions={"train": 0.75, "val":0.15, "test":0.1},
