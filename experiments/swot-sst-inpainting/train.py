@@ -406,10 +406,11 @@ if __name__ == '__main__':
         env=['export WANDB_SILENT=true'],
         dry_run=False,
         singularity=(
-                """singularity exec  
-                --overlay /scratch/tm3076/singularity_container/my_conda.ext3:ro 
-                /share/apps/images/cuda12.1.1-cudnn8.9.0-devel-ubuntu22.04.2.sif 
-                /bin/bash -c 'source /ext3/env.sh; conda activate priors; python'"""
+                """singularity exec  \
+                --bind /opt/slurm/bin:/opt/slurm/bin \
+                --overlay /scratch/tm3076/singularity_container/my_conda.ext3:ro \
+                /share/apps/images/cuda12.1.1-cudnn8.9.0-devel-ubuntu22.04.2.sif \
+                /bin/bash -c 'export PATH="/opt/slurm/bin:$PATH"; source /ext3/env.sh; conda activate priors; python'"""
             )
         )
      
