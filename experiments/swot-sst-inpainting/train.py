@@ -10,14 +10,10 @@ import wandb                 # Weights and Biases for experiment tracking
 
 # Data handling
 from datasets import Array3D, Features #load_from_disk
-import sys
-sys.path.append('./')
-import JAXdata_loaders_seasonal
 
 # Workflow management
 from dawgz import job, schedule
 
-# Utils
 from functools import partial
 from tqdm import trange
 from typing import *
@@ -53,56 +49,8 @@ CONFIG = {
     'ema_decay': 0.9999,
 }
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-standards = {
-            "mean_ssh": 0.0, "std_ssh": 0.0453692672359483,
-            "mean_sst": 15.956900367755182, "std_sst": 5.987649544923141
-            }
-DATA_CONFIG = {
-    "data_dir": "/home/tm3076/scratch/pytorch_learning_tiles"  ,
-    "N_t": 1,
-    "infields": ["zarr_llc4320_SST_tiles_4km"],
-    "in_mask_list": ["cloud_rho"],
-    "in_transform_list": ["std_global_mean_sst_norm"],
-    "standards":standards,
-    "flatten": False,
-    "return_meta_data": False,
-    "cloud_rho": 0.5,
-}
-
-PATCH_COORDS = f"{DATA_CONFIG['data_dir']}/zarred_UVSST_x_y_coordinates_noland_nonan.npy",
-T_RANGE = range(5, 360, 5)
-SPLIT_FRACTIONS = {"train": 0.75, "val":0.15, "test":0.1}
-#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-def generate_custom(model, dataset, rng, batch_size, **kwargs):
-    """
-    Generate denoised samples for the entire dataset using the provided model.
-    Returns a new Hugging_face_wrapper holding only {'x'}.
-    """
-    x_list = []
-    loader = dataset.iter(batch_size=batch_size, drop_last_batch=True)
-    for batch in loader:
-        y, A = batch['y'], batch['A']
-        x = sample(model, y, A, rng.split(), **kwargs)
-        x = np.asarray(x)
-        x_list.append(x)
-    # Concatenate all outputs
-    x_full = np.concatenate(x_list, axis=0)
-    # Create a dataset-like object that yields {'x'} entries
-    class GeneratedDataset:
-        def __init__(self, x_data):
-            self.x_data = x_data
-        def __len__(self):
-            return len(self.x_data)
-        def __getitem__(self, idx):
-            if isinstance(idx, slice) or isinstance(idx, np.ndarray) or isinstance(idx, list):
-                idx = np.arange(len(self))[idx] if isinstance(idx, slice) else idx
-                x = np.stack([self[i]['x'] for i in idx])
-                return {'x': x}
-            return {'x': self.x_data[idx]}
-    return JAXdata_loaders_seasonal.Hugging_face_wrapper(GeneratedDataset(x_full))
-
 import jax.numpy as jnp
 import numpy as np
 import zarr
