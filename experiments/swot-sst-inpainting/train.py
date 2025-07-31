@@ -102,6 +102,68 @@ def generate_custom(model, dataset, rng, batch_size, **kwargs):
                 return {'x': x}
             return {'x': self.x_data[idx]}
     return JAXdata_loaders_seasonal.Hugging_face_wrapper(GeneratedDataset(x_full))
+
+import jax.numpy as jnp
+import numpy as np
+import zarr
+from glob import glob
+from pathlib import Path
+
+class PrecomputedJAXDataset:
+    def __init__(self, source, format="zarr"):
+        self.format = format
+        self.source = Path(source)
+        self.splits = {}
+        for split in ["train", "val", "test"]:
+            split_path = self.source / split
+            if not split_path.exists():
+                continue
+            if format == "npz":
+                paths = sorted(glob(str(split_path / "sample_*.npz")))
+                self.splits[split] = {
+                    "type": "npz",
+                    "paths": paths,
+                    "length": len(paths)
+                }
+            elif format == "zarr":
+                z = zarr.open_group(str(split_path), mode="r")
+                self.splits[split] = {
+                    "type": "zarr",
+                    "zarr": z,
+                    "length": len(next(iter(z.values())))
+                }
+            else:
+                raise ValueError(f"Unsupported format: {format}")
+    def __getitem__(self, split):
+        if split not in self.splits:
+            raise KeyError(f"Split '{split}' not found. Available: {list(self.splits.keys())}")
+        return self._get_split_dataset(split)
+    def _get_split_dataset(self, split):
+        info = self.splits[split]
+        if info["type"] == "npz":
+            return _NPZSubDataset(info["paths"])
+        elif info["type"] == "zarr":
+            return _ZarrSubDataset(info["zarr"])
+        else:
+            raise ValueError("Unknown dataset type")
+
+class _NPZSubDataset:
+    def __init__(self, paths):
+        self.paths = paths
+    def __len__(self):
+        return len(self.paths)
+    def __getitem__(self, idx):
+        arrays = np.load(self.paths[idx])
+        return {k: jnp.array(v) for k, v in arrays.items()}
+
+class _ZarrSubDataset:
+    def __init__(self, zarr_group):
+        self.zarr = zarr_group
+        self.length = len(next(iter(zarr_group.values())))
+    def __len__(self):
+        return self.length
+    def __getitem__(self, idx):
+        return {k: jnp.array(self.zarr[k][idx]) for k in self.zarr}
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 """ Old method
@@ -130,7 +192,7 @@ def generate(model, dataset, rng, batch_size, **kwargs):
     )
 """
 
-def train(runid: int, lap: int):
+def train(runid: int, lap: int, src: str):
     """
     Main training loop for a single training 'lap' (iteration).
     Each lap can be seen as one cycle of training, optionally starting from a prior checkpoint.
@@ -162,12 +224,17 @@ def train(runid: int, lap: int):
     
     #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     # Load HuggingFace-formatted LLC4320 dataset
+    # Load custom
+    """
     dataset = JAXdata_loaders_seasonal.JAXLLC4320_HFformated_dataset(
             patch_coords=f"{config['data_dir']}/zarred_UVSST_x_y_coordinates_noland_nonan.npy",
             t_range=range(5, 360, 5),
             split_fractions={"train": 0.75, "val":0.15, "test":0.1},
             config=DATA_CONFIG,  
             )
+    """
+    dataset = PrecomputedJAXDataset(src,format="zarr")
+    
     #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     
     trainset_yA = dataset['train']
@@ -366,12 +433,13 @@ if __name__ == '__main__':
     wandb.login()
     runid = wandb.util.generate_id()
     jobs = []
+    src = "/home/tm3076/scratch/priors_precomputed_datasets/precomputed_data_sst/sst_crho_0.4"
 
     # Schedule multiple laps as Slurm jobs
     for lap in range(32):
         jobs.append(
             job(
-                partial(train, runid=runid, lap=lap),
+                partial(train, runid=runid, lap=lap, src=src),
                 name=f'train_{lap}',
                 cpus=4,
                 gpus=4,
