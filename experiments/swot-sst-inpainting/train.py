@@ -391,8 +391,12 @@ if __name__ == '__main__':
                 name=f'train_{lap}',
                 cpus=4,
                 gpus=4,
-                ram='128',
+                ram='128GB',
                 time='1-00:00:00',
+                partition='h200',
+                wrap="hostname && sleep infinity"
+                
+                
            )
         )
         if len(jobs) > 1:
