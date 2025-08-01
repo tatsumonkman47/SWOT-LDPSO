@@ -395,26 +395,28 @@ if __name__ == '__main__':
                 time='1-00:00:00',
                 partition='h200',
                 wrap='\"hostname && sleep infinity\"'
-                
+               
                 
            )
         )
         if len(jobs) > 1:
-            jobs[-1].after(jobs[-2])
+            jobs[-1].after(jobs[-2], status="any")
 
     schedule(
         *jobs,
         name=f'Training {runid}',
         backend='slurm',
+        debug=True,
         export='ALL',
         env=['export WANDB_SILENT=true'],
         dry_run=False,
         singularity=(
-                """singularity exec  \
-                --bind /opt/slurm/bin:/opt/slurm/bin \
-                --overlay /scratch/tm3076/singularity_container/my_conda.ext3:ro \
-                /share/apps/images/cuda12.1.1-cudnn8.9.0-devel-ubuntu22.04.2.sif \
-                /bin/bash -c 'export PATH="/opt/slurm/bin:$PATH"; source /ext3/env.sh; conda activate priors; python'"""
-            )
-        )
-     
+                """singularity exec --nv \
+                --bind /opt/slurm:/opt/slurm \
+                --bind /var/run/munge:/var/run/munge \
+                --overlay /scratch/tm3076/singularity_container/EDIT_JAX-cuDNN9.8-overlay-15GB-500K.ext3:ro \
+                /share/apps/images/cuda12.8.1-cudnn9.8.0-ubuntu24.04.2.sif \
+                /bin/bash -c 'export PATH="/opt/slurm/bin:$PATH" && source /ext3/env.sh &&  {python_command}'"""
+
+            ) 
+        )   
