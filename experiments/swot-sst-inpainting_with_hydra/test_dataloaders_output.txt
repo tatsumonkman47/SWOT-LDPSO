@@ -1,0 +1,74 @@
+splict_path /home/tm3076/scratch/priors_precomputed_datasets/precomputed_data_sst/sst_crho_0.4/train
+z <Group file:///home/tm3076/scratch/priors_precomputed_datasets/precomputed_data_sst/sst_crho_0.4/train>
+splict_path /home/tm3076/scratch/priors_precomputed_datasets/precomputed_data_sst/sst_crho_0.4/val
+z <Group file:///home/tm3076/scratch/priors_precomputed_datasets/precomputed_data_sst/sst_crho_0.4/val>
+splict_path /home/tm3076/scratch/priors_precomputed_datasets/precomputed_data_sst/sst_crho_0.4/test
+z <Group file:///home/tm3076/scratch/priors_precomputed_datasets/precomputed_data_sst/sst_crho_0.4/test>
+[[[1.]
+  [1.]
+  [1.]
+  ...
+  [1.]
+  [1.]
+  [1.]]
+
+ [[1.]
+  [1.]
+  [1.]
+  ...
+  [1.]
+  [1.]
+  [1.]]
+
+ [[1.]
+  [1.]
+  [1.]
+  ...
+  [1.]
+  [1.]
+  [1.]]
+
+ ...
+
+ [[0.]
+  [0.]
+  [0.]
+  ...
+  [0.]
+  [0.]
+  [0.]]
+
+ [[0.]
+  [0.]
+  [0.]
+  ...
+  [0.]
+  [0.]
+  [0.]]
+
+ [[0.]
+  [0.]
+  [0.]
+  ...
+  [0.]
+  [0.]
+  [0.]]]
+splict_path /home/tm3076/scratch/priors_precomputed_datasets/precomputed_data_sst/sst_crho_0.4/train
+z <Group file:///home/tm3076/scratch/priors_precomputed_datasets/precomputed_data_sst/sst_crho_0.4/train>
+splict_path /home/tm3076/scratch/priors_precomputed_datasets/precomputed_data_sst/sst_crho_0.4/val
+z <Group file:///home/tm3076/scratch/priors_precomputed_datasets/precomputed_data_sst/sst_crho_0.4/val>
+splict_path /home/tm3076/scratch/priors_precomputed_datasets/precomputed_data_sst/sst_crho_0.4/test
+z <Group file:///home/tm3076/scratch/priors_precomputed_datasets/precomputed_data_sst/sst_crho_0.4/test>
+Loaded shapes: (128, 128, 1) (128, 128, 1)
+Loaded dtypes: float32 float32
+CG info: None
+Result shape: (16384,)
+splict_path /home/tm3076/scratch/priors_precomputed_datasets/precomputed_data_sst/sst_crho_0.4/train
+z <Group file:///home/tm3076/scratch/priors_precomputed_datasets/precomputed_data_sst/sst_crho_0.4/train>
+splict_path /home/tm3076/scratch/priors_precomputed_datasets/precomputed_data_sst/sst_crho_0.4/val
+z <Group file:///home/tm3076/scratch/priors_precomputed_datasets/precomputed_data_sst/sst_crho_0.4/val>
+splict_path /home/tm3076/scratch/priors_precomputed_datasets/precomputed_data_sst/sst_crho_0.4/test
+z <Group file:///home/tm3076/scratch/priors_precomputed_datasets/precomputed_data_sst/sst_crho_0.4/test>
+A_batch.shape: (16384, 128, 128, 1)
+y_batch.shape: (16384, 128, 128, 1)
+Launching CG with batched partial...

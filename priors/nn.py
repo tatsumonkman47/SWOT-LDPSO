@@ -5,9 +5,9 @@ import inox.nn as nn
 import jax.numpy as jnp
 
 from einops import rearrange
-from inox.random import PRNG, get_rng, set_rng
 from jax import Array
 from typing import *
+from contextlib import nullcontext
 
 
 class MLP(nn.Sequential):
@@ -32,9 +32,8 @@ class MLP(nn.Sequential):
         key: Array = None,
     ):
         if key is None:
-            rng = get_rng()
-        else:
-            rng = PRNG(key)
+            raise ValueError("MLP must be given a key")
+        keys = jax.random.split(key, len(hid_features) + 1)
 
         layers = []
 
@@ -43,7 +42,7 @@ class MLP(nn.Sequential):
             (*hid_features, out_features),
         ):
             layers.extend([
-                nn.Linear(before, after, key=rng.split()),
+                nn.Linear(before, after, key=keys[i]),
                 activation(),
                 nn.LayerNorm() if normalize else None,
             ])
@@ -56,11 +55,12 @@ class MLP(nn.Sequential):
 class Modulation(nn.Module):
     r"""Creates an adaptive modulation module."""
 
-    def __init__(self, channels: int, emb_features: int):
+    def __init__(self, channels: int, emb_features: int, key: Array):
+        k1, k2 = jax.random.split(key)
         self.mlp = nn.Sequential(
-            nn.Linear(emb_features, emb_features),
+            nn.Linear(emb_features, emb_features, key=k1),
             nn.SiLU(),
-            nn.Linear(emb_features, 3 * channels),
+            nn.Linear(emb_features, 3 * channels, key=k2),
             nn.Rearrange('... C -> ... 1 1 C'),
         )
 
@@ -80,12 +80,14 @@ class ResBlock(nn.Module):
         channels: int,
         emb_features: int,
         dropout: float = None,
+        key: Array = None,
         **kwargs,
     ):
-        self.modulation = Modulation(channels, emb_features)
+        k1, k2 = jax.random.split(key)
+        self.modulation = Modulation(channels, emb_features, key=k1)
         self.block = nn.Sequential(
             nn.LayerNorm(),
-            nn.Conv(channels, channels, **kwargs),
+            nn.Conv(channels, channels, key=k2, **kwargs),
             nn.SiLU(),
             nn.Identity() if dropout is None else nn.TrainingDropout(dropout),
             nn.Conv(channels, channels, **kwargs),
@@ -104,14 +106,16 @@ class ResBlock(nn.Module):
 class AttBlock(nn.Module):
     r"""Creates a residual self-attention block."""
 
-    def __init__(self, channels: int, emb_features: int, heads: int = 1):
-        self.modulation = Modulation(channels, emb_features)
+    def __init__(self, channels: int, emb_features: int, heads: int = 1, key: Array = None):
+        k1, k2 = jax.random.split(key)
+        self.modulation = Modulation(channels, emb_features, key=k1)
         self.norm = nn.LayerNorm()
         self.attn = nn.MultiheadAttention(
             heads=heads,
             in_features=channels,
             out_features=channels,
             hid_features=channels // heads,
+            key=k2,
         )
 
     @inox.checkpoint
@@ -144,7 +148,9 @@ class UNet(nn.Module):
         key: Array = None,
     ):
         if key is None:
-            key = get_rng().split()
+           raise ValueError("init_key must be passed explicitly") 
+        key = jax.random.split(key, sum(hid_blocks) * 4)  # 4 keys per block max
+        k_iter = iter(key)
 
         stride = [2 for k in kernel_size]
         kwargs = dict(
@@ -152,56 +158,57 @@ class UNet(nn.Module):
             padding=[(k // 2, k // 2) for k in kernel_size],
         )
 
-        with set_rng(PRNG(key)):
-            self.descent, self.ascent = [], []
+        self.descent, self.ascent = [], []
 
-            for i, blocks in enumerate(hid_blocks):
-                do, up = [], []
+        for i, blocks in enumerate(hid_blocks):
+            do, up = [], []
 
-                for _ in range(blocks):
-                    do.append(ResBlock(hid_channels[i], emb_features, dropout=dropout, **kwargs))
-                    up.append(ResBlock(hid_channels[i], emb_features, dropout=dropout, **kwargs))
+            for _ in range(blocks):
+                do.append(ResBlock(hid_channels[i], emb_features, dropout=dropout, key=next(k_iter), **kwargs))
+                up.append(ResBlock(hid_channels[i], emb_features, dropout=dropout, key=next(k_iter), **kwargs))
 
-                    if i in heads:
-                        do.append(AttBlock(hid_channels[i], emb_features, heads[i]))
-                        up.append(AttBlock(hid_channels[i], emb_features, heads[i]))
+                if i in heads:
+                    do.append(AttBlock(hid_channels[i], emb_features, heads[i], key=next(k_iter)))
+                    up.append(AttBlock(hid_channels[i], emb_features, heads[i], key=next(k_iter)))
 
-                if i > 0:
-                    do.insert(
-                        0,
-                        nn.Sequential(
-                            nn.Conv(
-                                hid_channels[i - 1],
-                                hid_channels[i],
-                                stride=stride,
-                                **kwargs,
-                            ),
-                            nn.LayerNorm(),
-                        ),
-                    )
-
-                    up.append(
-                        nn.Sequential(
-                            nn.LayerNorm(),
-                            nn.Resample(factor=stride, method='nearest'),
-                        )
-                    )
-                else:
-                    do.insert(0, nn.Conv(in_channels, hid_channels[i], **kwargs))
-                    up.append(nn.Linear(hid_channels[i], out_channels))
-
-                if i + 1 < len(hid_blocks):
-                    up.insert(
-                        0,
+            if i > 0:
+                do.insert(
+                    0,
+                    nn.Sequential(
                         nn.Conv(
-                            hid_channels[i] + hid_channels[i + 1],
+                            hid_channels[i - 1],
                             hid_channels[i],
+                            stride=stride,  
+                            key=next(k_iter),
                             **kwargs,
                         ),
-                    )
+                        nn.LayerNorm(),
+                    ),
+                )
 
-                self.descent.append(do)
-                self.ascent.insert(0, up)
+                up.append(
+                    nn.Sequential(
+                        nn.LayerNorm(),
+                        nn.Resample(factor=stride, method='nearest'),
+                    )
+                )
+            else:
+                do.insert(0, nn.Conv(in_channels, hid_channels[i], **kwargs))
+                up.append(nn.Linear(hid_channels[i], out_channels))
+
+            if i + 1 < len(hid_blocks):
+                up.insert(
+                    0,
+                    nn.Conv(
+                        hid_channels[i] + hid_channels[i + 1],
+                        hid_channels[i],
+                        key=next(k_iter),
+                        **kwargs,
+                    ),
+                )
+
+            self.descent.append(do)
+            self.ascent.insert(0, up)
 
     def __call__(self, x: Array, t: Array, key: Array = None) -> Array:
         r"""
@@ -210,34 +217,27 @@ class UNet(nn.Module):
             t: The time embedding, with shape :math:`(*, T)`.
             key: A PRNG key.
         """
+        memory = []
 
-        if key is None:
-            rng = None
-        else:
-            rng = PRNG(key)
+        for blocks in self.descent:
+            for block in blocks:
+                if isinstance(block, (ResBlock, AttBlock)):
+                    x = block(x, t)
+                else:
+                    x = block(x)
 
-        with set_rng(rng):
-            memory = []
+            memory.append(x)
 
-            for blocks in self.descent:
-                for block in blocks:
-                    if isinstance(block, (ResBlock, AttBlock)):
-                        x = block(x, t)
-                    else:
-                        x = block(x)
+        for blocks in self.ascent:
+            y = memory.pop()
 
-                memory.append(x)
+            if x is not y:
+                x = jnp.concatenate((x, y), axis=-1)
 
-            for blocks in self.ascent:
-                y = memory.pop()
+            for block in blocks:
+                if isinstance(block, (ResBlock, AttBlock)):
+                    x = block(x, t)
+                else:
+                    x = block(x)
 
-                if x is not y:
-                    x = jnp.concatenate((x, y), axis=-1)
-
-                for block in blocks:
-                    if isinstance(block, (ResBlock, AttBlock)):
-                        x = block(x, t)
-                    else:
-                        x = block(x)
-
-            return x
+        return x

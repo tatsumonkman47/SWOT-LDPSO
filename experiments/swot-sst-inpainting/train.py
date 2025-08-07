@@ -56,7 +56,6 @@ import numpy as np
 import zarr
 from glob import glob
 from pathlib import Path
-
 class PrecomputedJAXDataset:
     def __init__(self, source, format="zarr"):
         self.format = format
@@ -64,6 +63,7 @@ class PrecomputedJAXDataset:
         self.splits = {}
         for split in ["train", "val", "test"]:
             split_path = self.source / split
+            print("splict_path",split_path)
             if not split_path.exists():
                 continue
             if format == "npz":
@@ -75,10 +75,19 @@ class PrecomputedJAXDataset:
                 }
             elif format == "zarr":
                 z = zarr.open_group(str(split_path), mode="r")
+                print("z", z)
+
+                # Compatibility with zarr v2 and v3
+                keys = list(z.keys())
+                if not keys:
+                    raise ValueError(f"No datasets found in {split_path}")
+                first_array = z[keys[0]]
+                length = first_array.shape[0]
+
                 self.splits[split] = {
                     "type": "zarr",
                     "zarr": z,
-                    "length": len(next(iter(z.values())))
+                    "length": length
                 }
             else:
                 raise ValueError(f"Unsupported format: {format}")
@@ -101,44 +110,127 @@ class _NPZSubDataset:
     def __len__(self):
         return len(self.paths)
     def __getitem__(self, idx):
-        arrays = np.load(self.paths[idx])
-        return {k: jnp.array(v) for k, v in arrays.items()}
+        if isinstance(idx, slice):
+            # Handle slice: return dict with arrays for multiple samples
+            indices = range(*idx.indices(len(self)))
+            result = {}
+            for i, file_idx in enumerate(indices):
+                arrays = np.load(self.paths[file_idx])
+                if i == 0:
+                    # Initialize result dict with empty lists
+                    result = {k: [] for k in arrays.keys()}
+                for k, v in arrays.items():
+                    result[k].append(jnp.array(v))
+            # Stack all arrays
+            return {k: jnp.stack(v) for k, v in result.items()}
+        else:
+            # Handle single index
+            arrays = np.load(self.paths[idx])
+            return {k: jnp.array(v) for k, v in arrays.items()}
 
 class _ZarrSubDataset:
     def __init__(self, zarr_group):
         self.zarr = zarr_group
-        self.length = len(next(iter(zarr_group.values())))
+        keys = list(zarr_group.keys())
+        if not keys:
+            raise ValueError("Zarr group contains no arrays")
+        self.keys = keys
+        self.length = zarr_group[keys[0]].shape[0]
+        self._indices = None  # For shuffling
     def __len__(self):
         return self.length
+    def shuffle(self, seed):
+        """Shuffle the dataset indices."""
+        rng = np.random.RandomState(seed)
+        self._indices = rng.permutation(self.length)
+        return self
     def __getitem__(self, idx):
-        return {k: jnp.array(self.zarr[k][idx]) for k in self.zarr}
-#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+        # Apply shuffled indices if they exist
+        if self._indices is not None:
+            if isinstance(idx, slice):
+                slice_indices = self._indices[idx]
+                return {k: jnp.array(self.zarr[k][slice_indices]) for k in self.keys}
+            else:
+                actual_idx = self._indices[idx]
+                return {k: jnp.array(self.zarr[k][actual_idx]) for k in self.keys}
+        else:
+            # Original behavior
+            if isinstance(idx, slice):
+                return {k: jnp.array(self.zarr[k][idx]) for k in self.keys}
+            else:
+                return {k: jnp.array(self.zarr[k][idx]) for k in self.keys}
 
-""" Old method
+# Add this class after your existing dataset classes
+class SimpleDataset:
+    """Simple dataset class that mimics the interface expected by the training code."""
+    def __init__(self, data):
+        self.data = data
+        self.length = len(list(data.values())[0])
+    
+    def __len__(self):
+        return self.length
+    
+    def __getitem__(self, key):
+        if isinstance(key, slice):
+            # Return dict with sliced arrays for operations like trainset[:10384]['x']
+            return {k: v[key] for k, v in self.data.items()}
+        else:
+            # Return specific key for operations like trainset['x']
+            return self.data[key]
+    
+    def shuffle(self, seed):
+        """Return a new shuffled dataset."""
+        rng = np.random.RandomState(seed)
+        indices = rng.permutation(self.length)
+        shuffled_data = {k: v[indices] for k, v in self.data.items()}
+        return SimpleDataset(shuffled_data)
+    
+    def iter(self, batch_size, drop_last_batch=True):
+        """Iterate over the dataset in batches."""
+        for i in range(0, self.length, batch_size):
+            if drop_last_batch and i + batch_size > self.length:
+                break
+            batch = {k: v[i:i+batch_size] for k, v in self.data.items()}
+            yield batch
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 def generate(model, dataset, rng, batch_size, **kwargs):
-    ```
-    Generate denoised samples for the entire dataset using the provided model.
-    This function applies the diffusion sampler to reconstruct full images.
-    ```
     def transform(batch):
         y, A = batch['y'], batch['A']
         x = sample(model, y, A, rng.split(), **kwargs)
         x = np.asarray(x)
         return {'x': x}
-    
-    # Define output data structure
-    types = {'x': Array3D(shape=(32, 32, 3), dtype='float32')}
 
-    return dataset.map(
-        transform,
-        features=Features(types),
-        remove_columns=['y', 'A'],
-        keep_in_memory=True,
-        batched=True,
-        batch_size=batch_size,
-        drop_last_batch=True,
-    )
-"""
+    # Process the dataset in batches and collect results
+    results = []
+    for i in range(0, len(dataset), batch_size):
+        # Get batch indices
+        batch_indices = list(range(i, min(i + batch_size, len(dataset))))
+        if len(batch_indices) < batch_size:
+            break  # Drop last incomplete batch
+            
+        # Create batch by collecting items
+        batch = {k: [] for k in dataset[0].keys()}
+        for idx in batch_indices:
+            item = dataset[idx]
+            for k, v in item.items():
+                batch[k].append(v)
+        
+        # Stack the batch arrays
+        batch = {k: jnp.stack(v) for k, v in batch.items()}
+        
+        # Apply transform
+        transformed_batch = transform(batch)
+        results.append(transformed_batch)
+    
+    # Combine all results
+    all_data = {}
+    for key in results[0].keys():
+        all_data[key] = jnp.concatenate([batch[key] for batch in results])
+    
+    # Return a SimpleDataset that supports the operations used later
+    return SimpleDataset(all_data)
+
+
 
 def train(runid: int, lap: int, src: str):
     """
@@ -172,17 +264,7 @@ def train(runid: int, lap: int, src: str):
     
     #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     # Load HuggingFace-formatted LLC4320 dataset
-    # Load custom
-    """
-    dataset = JAXdata_loaders_seasonal.JAXLLC4320_HFformated_dataset(
-            patch_coords=f"{config['data_dir']}/zarred_UVSST_x_y_coordinates_noland_nonan.npy",
-            t_range=range(5, 360, 5),
-            split_fractions={"train": 0.75, "val":0.15, "test":0.1},
-            config=DATA_CONFIG,  
-            )
-    """
     dataset = PrecomputedJAXDataset(src,format="zarr")
-    
     #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     
     trainset_yA = dataset['train']
@@ -191,19 +273,26 @@ def train(runid: int, lap: int, src: str):
     # Validation data (fixed samples)
     y_eval, A_eval = testset_yA[:16]['y'], testset_yA[:16]['A']
     y_eval, A_eval = jax.device_put((y_eval, A_eval), distributed)
+    B, H, W, C = y_eval.shape
+    D = H * W * C
 
     # If lap >0, load previous checkpoint, else fit prior Gaussian model
     if lap > 0:
         previous = load_module(runpath / f'checkpoint_{lap - 1}.pkl')
     else:
-        # Fit Gaussian prior from first 16k training samples
-        y_fit, A_fit = trainset_yA[:16384]['y'], trainset_yA[:16384]['A']
+        # Shuffle the training dataset for moment fitting
+        shuffle_seed = hash((runid, "moment_fitting")) % 2**16
+        shuffled_trainset = trainset_yA.shuffle(shuffle_seed)  # Add shuffle method
+        # Now take first N samples (which are actually shuffled)
+        y_fit, A_fit = shuffled_trainset[:6144]['y'], shuffled_trainset[:6144]['A']
         y_fit, A_fit = jax.device_put((y_fit, A_fit), distributed)
+        B, H, W, C = y_fit.shape
+        D = H * W * C
         mu_x, cov_x = fit_moments(
-            features=128 * 128 * 1, # The dimensionality of the latent variable x
+            features=D, # The dimensionality of the latent variable x
             rank=320, # This is the low-rank dimension of your approximate posterior or prior covariance matrix
             shard=True,
-            A=inox.Partial(measure, A_fit),
+            A=inox.tree.Partial(measure, A_fit, H=H, W=W, C=C),
             y=flatten(y_fit),
             cov_y=1e-3**2,
             sampler='ddim',
@@ -254,7 +343,7 @@ def train(runid: int, lap: int, src: str):
     if lap > 0:
         model = previous
     else:
-        model = make_model(key=rng.split(), **CONFIG)
+       model = make_model(key=rng.split(), in_channels=C, out_channels=C, **CONFIG) 
 
     # Set model's prior mean
     model.mu_x = mu_x
@@ -359,7 +448,10 @@ def train(runid: int, lap: int, src: str):
                 steps=config.discrete,
                 maxiter=config.maxiter,
             )
-            x = x.reshape(4, 4, 128, 128, 1)
+            num = x.shape[0]
+            cols = int(np.sqrt(num))
+            rows = num // cols
+            x = x.reshape(rows, cols, H, W, C)
             run.log({
                 'loss': loss_train,
                 'loss_val': loss_val,
@@ -395,8 +487,6 @@ if __name__ == '__main__':
                 time='1-00:00:00',
                 partition='h200',
                 wrap='\"hostname && sleep infinity\"'
-               
-                
            )
         )
         if len(jobs) > 1:
