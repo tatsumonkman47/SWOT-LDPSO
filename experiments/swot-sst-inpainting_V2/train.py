@@ -292,20 +292,19 @@ def train(runid: int, lap: int, src: str):
         B, H, W, C = y_fit.shape
         D = H * W * C
         t1a = time.time()
-        with inox_random.state(init=rng.split(), dropout=rng.split()):
-            mu_x, cov_x = fit_moments(
-                features=D, # The dimensionality of the latent variable x
-                rank=320, # This is the low-rank dimension of your approximate posterior or prior covariance matrix
-                shard=True,
-                A=inox.tree.Partial(measure, A_fit, H=H, W=W, C=C),
-                y=flatten(y_fit),
-                cov_y=1e-3**2,
-                sampler='ddim',
-                sde=sde,
-                steps=256,
-                maxiter=None,
-                key=rng.split(),
-            )
+        mu_x, cov_x = fit_moments(
+            features=D, # The dimensionality of the latent variable x
+            rank=320, # This is the low-rank dimension of your approximate posterior or prior covariance matrix
+            shard=True,
+            A=inox.tree.Partial(measure, A_fit, H=H, W=W, C=C),
+            y=flatten(y_fit),
+            cov_y=1e-3**2,
+            sampler='ddim',
+            sde=sde,
+            steps=256,
+            maxiter=None,
+            key=rng.split(),
+        )
         print(f"[{time.strftime('%X')}] fit_moments completed in {time.time() - t1a:.2f} seconds")
         del y_fit, A_fit
         previous = GaussianDenoiser(mu_x, cov_x)
@@ -359,7 +358,7 @@ def train(runid: int, lap: int, src: str):
     if lap > 0:
         model = previous
     else:
-        with inox_random.state(init=rng.split(), dropout=rng.split()):
+        with inox_random.set_rng(init=inox_random.PRNG(rng.split()), dropout=inox_random.PRNG(rng.split())):
             model = make_model(key=rng.split(), in_channels=C, out_channels=C, **CONFIG) 
     print(f"[{time.strftime('%X')}] Model initialized in {time.time() - t5:.2f} seconds")
 
