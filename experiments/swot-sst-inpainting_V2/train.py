@@ -3,6 +3,7 @@
 # Core Libraries
 import inox                  # type: ignore # Custom library (likely for modeling and random utilities)
 import inox.nn as nn         # type: ignore # type: ignore # Neural network components
+from inox import random as inox_random # type: ignore
 import jax                   # type: ignore # JAX for high-performance computing
 import numpy as np # type: ignore
 import optax                 # type: ignore # Optimizers for JAX
@@ -53,9 +54,9 @@ CONFIG = {
 }
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-import jax.numpy as jnp
-import numpy as np
-import zarr
+import jax.numpy as jnp # type: ignore
+import numpy as np # type: ignore
+import zarr # type: ignore
 from glob import glob
 from pathlib import Path
 import time
@@ -291,19 +292,20 @@ def train(runid: int, lap: int, src: str):
         B, H, W, C = y_fit.shape
         D = H * W * C
         t1a = time.time()
-        mu_x, cov_x = fit_moments(
-            features=D, # The dimensionality of the latent variable x
-            rank=320, # This is the low-rank dimension of your approximate posterior or prior covariance matrix
-            shard=True,
-            A=inox.tree.Partial(measure, A_fit, H=H, W=W, C=C),
-            y=flatten(y_fit),
-            cov_y=1e-3**2,
-            sampler='ddim',
-            sde=sde,
-            steps=256,
-            maxiter=None,
-            key=rng.split(),
-        )
+        with inox_random.state(init=rng.split(), dropout=rng.split()):
+            mu_x, cov_x = fit_moments(
+                features=D, # The dimensionality of the latent variable x
+                rank=320, # This is the low-rank dimension of your approximate posterior or prior covariance matrix
+                shard=True,
+                A=inox.tree.Partial(measure, A_fit, H=H, W=W, C=C),
+                y=flatten(y_fit),
+                cov_y=1e-3**2,
+                sampler='ddim',
+                sde=sde,
+                steps=256,
+                maxiter=None,
+                key=rng.split(),
+            )
         print(f"[{time.strftime('%X')}] fit_moments completed in {time.time() - t1a:.2f} seconds")
         del y_fit, A_fit
         previous = GaussianDenoiser(mu_x, cov_x)
@@ -357,7 +359,8 @@ def train(runid: int, lap: int, src: str):
     if lap > 0:
         model = previous
     else:
-       model = make_model(key=rng.split(), in_channels=C, out_channels=C, **CONFIG) 
+        with inox_random.state(init=rng.split(), dropout=rng.split()):
+            model = make_model(key=rng.split(), in_channels=C, out_channels=C, **CONFIG) 
     print(f"[{time.strftime('%X')}] Model initialized in {time.time() - t5:.2f} seconds")
 
     # Set model's prior mean
@@ -500,8 +503,8 @@ def train(runid: int, lap: int, src: str):
 
 
 if __name__ == '__main__':
-    wandb.login()
-    runid = wandb.util.generate_id()
+    wandb.login() # type: ignore
+    runid = wandb.util.generate_id() # type: ignore
     jobs = []
     src = "/home/tm3076/scratch/priors_precomputed_datasets/precomputed_data_sst/sst_crho_0.4"
 
@@ -524,7 +527,7 @@ if __name__ == '__main__':
     
     dry_run = True
     if dry_run:
-        jobs = [jobs[:1]]
+        jobs = jobs[:1]
     schedule(
         *jobs,
         name=f'Training {runid}',

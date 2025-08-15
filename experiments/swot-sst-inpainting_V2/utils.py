@@ -1,9 +1,9 @@
 r"""CIFAR experiment helpers"""
-import inox
-import inox.nn as nn
-import jax
-from jax import Array
-from inox.tree import Partial as Partial
+import inox # type: ignore
+import inox.nn as nn # type: ignore
+import jax # type: ignore
+from jax import Array # type: ignore
+from inox.tree import Partial as Partial # type: ignore
 
 from typing import Dict, Sequence, Optional
 from pathlib import Path
