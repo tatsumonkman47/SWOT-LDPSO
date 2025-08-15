@@ -1,11 +1,11 @@
 r"""Optimization helpers"""
 
-import inox
-import jax
-import jax.numpy as jnp
-import optax
+import inox # type: ignore
+import jax # type: ignore # type: ignore
+import jax.numpy as jnp # type: ignore
+import optax # type: ignore
 
-from jax import Array
+from jax import Array # type: ignore
 from typing import *
 
 
@@ -17,8 +17,8 @@ class Adam(inox.tree.Namespace):
         lr_init: float = 1e-3,
         lr_end: float = 1e-6,
         lr_warmup: float = 0.0,
-        weight_decay: float = None,
-        clip: float = None,
+        weight_decay: Optional[float] = None,
+        clip: Optional[float] = None,
         **absorb,
     ):
         super().__init__(
@@ -41,6 +41,8 @@ class Adam(inox.tree.Namespace):
             lr = self.lr_init + (self.lr_end - self.lr_init) * progress
         elif self.scheduler == 'exponential':
             lr = self.lr_init * (self.lr_end / self.lr_init) ** progress
+        else:
+            raise ValueError(f"Unknown scheduler: {self.scheduler}")
 
         return lr * heat
 

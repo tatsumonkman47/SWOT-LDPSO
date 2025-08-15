@@ -1,14 +1,14 @@
 r"""Image helpers"""
 
-import dm_pix as pix
-import jax
-import jax.numpy as jnp
-import numpy as np
+import dm_pix as pix # type: ignore
+import jax # type: ignore
+import jax.numpy as jnp # type: ignore
+import numpy as np # type: ignore
 
-from einops import rearrange
-from jax import Array
+from einops import rearrange # type: ignore
+from jax import Array # type: ignore
 from pathlib import Path
-from PIL import Image
+from PIL import Image # type: ignore
 from typing import *
 
 
@@ -32,7 +32,7 @@ def to_pil(
     pad: int = 0,
     background: int = 255,
     zoom: int = 1,
-    file: Union[str, Path] = None,
+    file: Optional[Union[str, Path]] = None,
 ) -> Image.Image:
     """
     Convert a batched grid of images into a single PIL Image.
@@ -78,17 +78,21 @@ def collate(
     images: List[List[Image.Image]],
     pad: int = 0,
     background: int = 255,
-    file: Union[str, Path] = None,
+    file: Optional[Union[str, Path]] = None,
 ) -> Image.Image:
     M, N = len(images), max(map(len, images))
-
+    W, H = None, None
     for i in range(M):
         for j in range(N):
             try:
                 W, H = images[i][j].size
             except IndexError:
                 continue
+        if W is not None and H is not None:
+            break  # Exit outer loop if size found
 
+    if W is None or H is None:
+        raise ValueError("No valid images found to determine canvas size.")
     canvas = Image.new(
         'RGB',
         size=(
@@ -97,14 +101,12 @@ def collate(
         ),
         color=background,
     )
-
     for i in range(M):
         for j in range(N):
             offset = (
                 j * (W + pad) + pad,
                 i * (H + pad) + pad,
             )
-
             try:
                 canvas.paste(images[i][j], offset)
             except IndexError:

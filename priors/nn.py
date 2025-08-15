@@ -1,11 +1,12 @@
 r"""Neural networks"""
 
-import inox
-import inox.nn as nn
-import jax.numpy as jnp
+import inox # type: ignore
+import inox.nn as nn # type: ignore # type: ignore
+import jax.numpy as jnp # type: ignore
 
-from einops import rearrange
-from jax import Array
+from einops import rearrange # type: ignore
+from jax import Array # type: ignore # type: ignore
+import jax # type: ignore
 from typing import *
 from contextlib import nullcontext
 
@@ -37,10 +38,10 @@ class MLP(nn.Sequential):
 
         layers = []
 
-        for before, after in zip(
+        for i, (before, after) in enumerate(zip(
             (in_features, *hid_features),
             (*hid_features, out_features),
-        ):
+        )):
             layers.extend([
                 nn.Linear(before, after, key=keys[i]),
                 activation(),
@@ -79,7 +80,7 @@ class ResBlock(nn.Module):
         self,
         channels: int,
         emb_features: int,
-        dropout: float = None,
+        dropout: Optional[float] = None,
         key: Array = None,
         **kwargs,
     ):
@@ -144,7 +145,7 @@ class UNet(nn.Module):
         kernel_size: Sequence[int] = (3, 3),
         emb_features: int = 64,
         heads: Dict[int, int] = {},
-        dropout: float = None,
+        dropout: Optional[float] = None,
         key: Array = None,
     ):
         if key is None:

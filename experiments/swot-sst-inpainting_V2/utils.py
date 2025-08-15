@@ -2,14 +2,11 @@ r"""CIFAR experiment helpers"""
 import inox
 import inox.nn as nn
 import jax
+from jax import Array
 from inox.tree import Partial as Partial
-from inox.jit import jit
 
 from typing import Dict, Sequence, Optional
-
-from jax import Array
 from pathlib import Path
-
 import os
 
 
@@ -26,8 +23,6 @@ else:
     PATH = Path('.')
 
 PATH.mkdir(parents=True, exist_ok=True)
-
-import jax.numpy as jnp
 
 def measure(A: Array, x: Array, H: int, W: int, C: int) -> Array:
     x_unflat = unflatten(x, H, W,)

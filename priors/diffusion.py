@@ -1,12 +1,12 @@
 r"""Diffusion helpers"""
 
-import inox
-import inox.nn as nn
-import jax
-import jax.numpy as jnp
-import numpy as np
+import inox # type: ignore # type: ignore
+import inox.nn as nn # type: ignore
+import jax # type: ignore
+import jax.numpy as jnp # type: ignore # type: ignore
+import numpy as np # type: ignore # type: ignore
 
-from jax import Array
+from jax import Array # type: ignore
 from typing import *
 
 # isort: split
@@ -55,7 +55,7 @@ class DDPM(nn.Module):
         sde: The forward SDE.
     """
 
-    def __init__(self, model: nn.Module, sde: VESDE = None):
+    def __init__(self, model: nn.Module, sde: Optional[VESDE] = None):
         super().__init__()
 
         self.model = model
@@ -218,7 +218,7 @@ class DenoiserLoss(nn.Module):
         sde: The forward SDE.
     """
 
-    def __init__(self, sde: VESDE = None):
+    def __init__(self, sde: Optional[VESDE] = None):
         if sde is None:
             self.sde = VESDE()
         else:
@@ -231,7 +231,7 @@ class DenoiserLoss(nn.Module):
         x: Array,
         z: Array,
         t: Array,
-        A: Callable[[Array], Array] = None,  # /!\ linear
+        A: Optional[Callable[[Array], Array]] = None,  # /!\ linear
         y: Array = None,
         key: Array = None,
     ) -> Array:

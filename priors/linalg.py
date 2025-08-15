@@ -2,10 +2,10 @@ r"""Linear algebra helpers"""
 
 from __future__ import annotations
 
-import jax
-import jax.numpy as jnp
+import jax # type: ignore
+import jax.numpy as jnp # type: ignore
 
-from jax import Array
+from jax import Array # type: ignore
 from typing import *
 
 

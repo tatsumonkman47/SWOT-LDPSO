@@ -1,20 +1,20 @@
 #!/usr/bin/env python
 
 # Core Libraries
-import inox                  # Custom library (likely for modeling and random utilities)
-import inox.nn as nn         # Neural network components
-import jax                   # JAX for high-performance computing
-import numpy as np
-import optax                 # Optimizers for JAX
+import inox                  # type: ignore # Custom library (likely for modeling and random utilities)
+import inox.nn as nn         # type: ignore # type: ignore # Neural network components
+import jax                   # type: ignore # JAX for high-performance computing
+import numpy as np # type: ignore
+import optax                 # type: ignore # Optimizers for JAX
 import wandb                 # Weights and Biases for experiment tracking
 
 # Workflow management
-from dawgz import job, schedule
+from dawgz import job, schedule # type: ignore
 
 from priors.diffusion import VESDE, DenoiserLoss, GaussianDenoiser
 from priors.data import prefetch
 from priors.image import random_flip, random_hue, random_saturation
-from priors.common import dump_module, ppca, fit_moments
+from priors.common import dump_module, ppca, fit_moments, load_module
 from priors.optim import Adam, EMA
 
 from functools import partial
@@ -58,6 +58,8 @@ import numpy as np
 import zarr
 from glob import glob
 from pathlib import Path
+import time
+
 class PrecomputedJAXDataset:
     def __init__(self, source, format="zarr"):
         self.format = format
@@ -168,10 +170,8 @@ class SimpleDataset:
     def __init__(self, data):
         self.data = data
         self.length = len(list(data.values())[0])
-    
     def __len__(self):
         return self.length
-    
     def __getitem__(self, key):
         if isinstance(key, slice):
             # Return dict with sliced arrays for operations like trainset[:10384]['x']
@@ -179,14 +179,12 @@ class SimpleDataset:
         else:
             # Return specific key for operations like trainset['x']
             return self.data[key]
-    
     def shuffle(self, seed):
         """Return a new shuffled dataset."""
         rng = np.random.RandomState(seed)
         indices = rng.permutation(self.length)
         shuffled_data = {k: v[indices] for k, v in self.data.items()}
         return SimpleDataset(shuffled_data)
-    
     def iter(self, batch_size, drop_last_batch=True):
         """Iterate over the dataset in batches."""
         for i in range(0, self.length, batch_size):
@@ -209,26 +207,21 @@ def generate(model, dataset, rng, batch_size, **kwargs):
         batch_indices = list(range(i, min(i + batch_size, len(dataset))))
         if len(batch_indices) < batch_size:
             break  # Drop last incomplete batch
-            
         # Create batch by collecting items
         batch = {k: [] for k in dataset[0].keys()}
         for idx in batch_indices:
             item = dataset[idx]
             for k, v in item.items():
                 batch[k].append(v)
-        
         # Stack the batch arrays
         batch = {k: jnp.stack(v) for k, v in batch.items()}
-        
         # Apply transform
         transformed_batch = transform(batch)
         results.append(transformed_batch)
-    
     # Combine all results
     all_data = {}
     for key in results[0].keys():
         all_data[key] = jnp.concatenate([batch[key] for batch in results])
-    
     # Return a SimpleDataset that supports the operations used later
     return SimpleDataset(all_data)
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -242,7 +235,8 @@ def train(runid: int, lap: int, src: str):
     Each lap can be seen as one cycle of training, optionally starting from a prior checkpoint.
     """
     # Initialize Weights & Biases
-    run = wandb.init(
+    start_time = time.time()
+    run = wandb.init( # type: ignore
         project='priors-SST-mask',
         id=runid,
         resume='allow',
@@ -268,7 +262,9 @@ def train(runid: int, lap: int, src: str):
     
     #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     # Load HuggingFace-formatted LLC4320 dataset
+    t0 = time.time()
     dataset = PrecomputedJAXDataset(src,format="zarr")
+    print(f"[{time.strftime('%X')}] Loaded dataset in {time.time() - t0:.2f} seconds")
     #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     
     trainset_yA = dataset['train']
@@ -281,8 +277,10 @@ def train(runid: int, lap: int, src: str):
     D = H * W * C
 
     # If lap >0, load previous checkpoint, else fit prior Gaussian model
+    t1 = time.time()
     if lap > 0:
         previous = load_module(runpath / f'checkpoint_{lap - 1}.pkl')
+        print(f"[{time.strftime('%X')}] Loaded previous checkpoint in {time.time() - t1:.2f} seconds")
     else:
         # Shuffle the training dataset for moment fitting
         shuffle_seed = hash((runid, "moment_fitting")) % 2**16
@@ -292,6 +290,7 @@ def train(runid: int, lap: int, src: str):
         y_fit, A_fit = jax.device_put((y_fit, A_fit), distributed)
         B, H, W, C = y_fit.shape
         D = H * W * C
+        t1a = time.time()
         mu_x, cov_x = fit_moments(
             features=D, # The dimensionality of the latent variable x
             rank=320, # This is the low-rank dimension of your approximate posterior or prior covariance matrix
@@ -305,15 +304,20 @@ def train(runid: int, lap: int, src: str):
             maxiter=None,
             key=rng.split(),
         )
+        print(f"[{time.strftime('%X')}] fit_moments completed in {time.time() - t1a:.2f} seconds")
         del y_fit, A_fit
         previous = GaussianDenoiser(mu_x, cov_x)
+        print(f"[{time.strftime('%X')}] GaussianDenoiser created in {time.time() - t1:.2f} seconds")
 
     # Prepare the previous model for sampling new training targets
+    t2 = time.time()
     static, arrays = previous.partition()
     arrays = jax.device_put(arrays, replicated)
     previous = static(arrays)
+    print(f"[{time.strftime('%X')}] Model partitioned and moved to device in {time.time() - t2:.2f} seconds")
 
     # Generate synthetic training and testing data (denoised reconstructions)
+    t3 = time.time()
     trainset = generate(
         model=previous,
         dataset=trainset_yA,
@@ -325,6 +329,8 @@ def train(runid: int, lap: int, src: str):
         steps=config.discrete,
         maxiter=config.maxiter,
     )
+    print(f"[{time.strftime('%X')}] Generated trainset in {time.time() - t3:.2f} seconds")
+    t3b = time.time()
     testset = generate(
         model=previous,
         dataset=testset_yA,
@@ -336,18 +342,23 @@ def train(runid: int, lap: int, src: str):
         steps=config.discrete,
         maxiter=config.maxiter,
     )
+    print(f"[{time.strftime('%X')}] Generated testset in {time.time() - t3b:.2f} seconds")
 
     # Fit low-rank covariance (PPCA) on generated training data
+    t4 = time.time()
     x_fit = trainset[:16384]['x']
     x_fit = flatten(x_fit)
     mu_x, cov_x = ppca(x_fit, rank=320, key=rng.split())
     del x_fit
+    print(f"[{time.strftime('%X')}] PPCA fit in {time.time() - t4:.2f} seconds")
 
     # Initialize model
+    t5 = time.time()
     if lap > 0:
         model = previous
     else:
        model = make_model(key=rng.split(), in_channels=C, out_channels=C, **CONFIG) 
+    print(f"[{time.strftime('%X')}] Model initialized in {time.time() - t5:.2f} seconds")
 
     # Set model's prior mean
     model.mu_x = mu_x
@@ -409,8 +420,11 @@ def train(runid: int, lap: int, src: str):
         avrg = ema(avrg, params)
         return loss, avrg, params, opt_state
 
+    print(f"[{time.strftime('%X')}] Setup complete, entering training loop. Total setup time: {time.time() - start_time:.2f} seconds")
+
     # Training loop over epochs
     for epoch in (bar := trange(config.epochs, ncols=88)):
+        epoch_start = time.time()
         # Shuffle training set per epoch
         loader = trainset.shuffle(seed=seed + lap * config.epochs + epoch).iter(
             batch_size=config.batch_size, drop_last_batch=True
@@ -427,6 +441,7 @@ def train(runid: int, lap: int, src: str):
         loss_train = np.stack(losses).mean()
 
         # Validation evaluation
+        val_start = time.time()
         loader = testset.iter(batch_size=config.batch_size, drop_last_batch=True)
         losses = []
         for batch in prefetch(loader):
@@ -436,10 +451,12 @@ def train(runid: int, lap: int, src: str):
             loss = ell(avrg, others, x, key=rng.split())
             losses.append(loss)
         loss_val = np.stack(losses).mean()
+        val_time = time.time() - val_start
         bar.set_postfix(loss=loss_train, loss_val=loss_val)
 
         # Every 16 epochs, sample validation images and log to wandb
         if (epoch + 1) % 16 == 0:
+            sample_start = time.time()
             model = static(avrg, others)
             model.train(False)
             x = sample(
@@ -460,17 +477,26 @@ def train(runid: int, lap: int, src: str):
                 'loss': loss_train,
                 'loss_val': loss_val,
                 'samples': wandb.Image(to_pil(x, zoom=4)),
+                'epoch_time': time.time() - epoch_start,
+                'val_time': val_time,
+                'sample_time': time.time() - sample_start,
             })
+            print(f"[{time.strftime('%X')}] Epoch {epoch+1}: train_loss={loss_train:.4f}, val_loss={loss_val:.4f}, epoch_time={time.time() - epoch_start:.2f}s, val_time={val_time:.2f}s, sample_time={time.time() - sample_start:.2f}s")
         else:
             run.log({
                 'loss': loss_train,
                 'loss_val': loss_val,
+                'epoch_time': time.time() - epoch_start,
+                'val_time': val_time,
             })
+            print(f"[{time.strftime('%X')}] Epoch {epoch+1}: train_loss={loss_train:.4f}, val_loss={loss_val:.4f}, epoch_time={time.time() - epoch_start:.2f}s, val_time={val_time:.2f}s")
 
     # Save checkpoint
+    t_save = time.time()
     model = static(avrg, others)
     model.train(False)
     dump_module(model, runpath / f'checkpoint_{lap}.pkl')
+    print(f"[{time.strftime('%X')}] Saved checkpoint in {time.time() - t_save:.2f} seconds")
 
 
 if __name__ == '__main__':
@@ -495,7 +521,10 @@ if __name__ == '__main__':
         )
         if len(jobs) > 1:
             jobs[-1].after(jobs[-2], status="any")
-
+    
+    dry_run = True
+    if dry_run:
+        jobs = [jobs[:1]]
     schedule(
         *jobs,
         name=f'Training {runid}',

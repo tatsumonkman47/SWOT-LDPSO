@@ -1,14 +1,14 @@
 r"""Common helpers"""
 
-import inox
-import inox.nn as nn
-import jax
-import jax.experimental.sparse as jes
-import jax.numpy as jnp
+import inox # type: ignore # type: ignore
+import inox.nn as nn # type: ignore
+import jax # type: ignore
+import jax.experimental.sparse as jes # type: ignore
+import jax.numpy as jnp # type: ignore # type: ignore
 import pickle
 
-from inox.random import PRNG, get_rng
-from jax import Array
+from inox.random import PRNG, get_rng # type: ignore
+from jax import Array # type: ignore
 from pathlib import Path
 from tqdm import tqdm
 from typing import *
@@ -123,7 +123,7 @@ def sample_any(
     model: nn.Module,
     shape: Sequence[int],
     shard: bool = False,
-    A: Callable[[Array], Array] = None,
+    A: Optional[Callable[[Array], Array]] = None,
     y: Array = None,
     cov_y: Union[Array, DPLR] = None,
     key: Array = None,
