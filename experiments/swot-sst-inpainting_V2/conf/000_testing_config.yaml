@@ -1,0 +1,38 @@
+data:
+  dataset_path: "/home/tm3076/scratch/pytorch_learning_tiles"
+  patch_coords_file: "x_y_coordinates_noland.zarr"
+  infields: ["zarr_llc4320_SSH_tiles_4km_filtered", "zarr_llc4320_SST_tiles_4km"]
+  outfields: ["zarr_llc4320_SSH_tiles_4km_filtered"]
+  in_mask_list: ["nadir", "cloud_rho"]
+  out_mask_list: ["swot_central"]
+  in_transform_list: ["std_global_mean_ssh_norm", "std_global_mean_sst_norm"]
+  out_transform_list: ["std_global_mean_ssh_norm"]
+  N_t: 20
+  timesteps_range: [30, 360, 5] # [start, stop, step]
+  batch_size: 5
+  return_masks: False
+  mean_ssh: 0.074
+  std_ssh: 0.0986
+  mean_sst: 293.307
+  std_sst: 0.8726
+  cloud_rho: 0.3
+
+model:
+  Number_timesteps: 20
+  alpha0: 1
+  alpha1: 10
+  alpha2: 10
+  lr: 1e-3
+  drop: 0.2
+  drop_path: 0.15
+  model_type: "gSTA"
+  multiprocessing: True
+  masked_loss: True
+
+training:
+  model_name: "SimVip_nolightning_gradloss"
+  num_epochs: 10
+  checkpoint_dir: "checkpoints"
+
+wandb:
+  project: "swot_inpainting"

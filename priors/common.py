@@ -161,6 +161,8 @@ def sample_any(
         sampler = DDIM(model, **kwargs)
     elif sampler == 'pc':
         sampler = PredictorCorrector(model, **kwargs)
+    else:
+        raise ValueError(f"Unknown sampler: {sampler}")
 
     z = jax.random.normal(key, shape)
 
