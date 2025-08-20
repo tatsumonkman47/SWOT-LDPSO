@@ -136,13 +136,9 @@ def train(runid: int, lap: int, src: str):
         previous = load_module(runpath / f'checkpoint_{lap - 1}.pkl')
         jax.debug.print(f"[{time.strftime('%X')}] Loaded previous checkpoint in {time.time() - t1:.2f} seconds")
     else:
-        # Shuffle the training dataset for moment fitting
-        N = len(trainset_yA)
-        shuffle_seed = hash((runid, "moment_fitting")) % 2**16
-        indices = np.random.RandomState(shuffle_seed).permutation(N)[:6144]
-        y_fit, A_fit = trainset_yA.select(indices)['y'], trainset_yA.select(indices)['A']
+        y_fit, A_fit = trainset_yA[:6144]['y'], trainset_yA[:6144]['A']
         y_fit, A_fit = jax.device_put((y_fit, A_fit), distributed)
-        jax.debug.print(f"[{time.strftime('%X')}] Loaded shuffled fitting dataset in {time.time() - t0:.2f} seconds")
+        jax.debug.print(f"[{time.strftime('%X')}] Loaded fitting dataset in {time.time() - t0:.2f} seconds")
         B, H, W, C = y_fit.shape
         D = H * W * C
         t1a = time.time()
