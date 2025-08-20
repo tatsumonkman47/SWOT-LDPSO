@@ -8,7 +8,7 @@ import jax                   # type: ignore # JAX for high-performance computing
 import numpy as np # type: ignore
 import optax                 # type: ignore # Optimizers for JAX
 import wandb                 # Weights and Biases for experiment tracking
-from datasets import Dataset, Features, Array3D
+from datasets import Dataset, Features, Array3D, load_from_disk 
 import jax.numpy as jnp # type: ignore # JAX's numpy for array operations
 
 # Workflow management
@@ -63,37 +63,14 @@ import glob
 from pathlib import Path
 import time
 
-def load_npz_as_hf_dataset(npz_dir):
-    npz_files = sorted(glob.glob(f"{npz_dir}/sample_*.npz"))
-    data_list = []
-    for fname in npz_files:
-        arrays = np.load(fname)
-        # Convert arrays to regular numpy arrays if needed
-        data_list.append({k: np.array(v) for k, v in arrays.items()})
-    return Dataset.from_list(data_list)
 
-def load_zarr_as_hf_dataset(zarr_path):
-    z = zarr.open_group(zarr_path, mode="r")
-    keys = list(z.keys())
-    #length = z[keys[0]].shape[0]
-    data_dict = {k: np.array(z[k][:]) for k in keys}
-    return Dataset.from_dict(data_dict)
-
-def load_dataset(split_path, format):
-    if format == "npz":
-        return load_npz_as_hf_dataset(split_path)
-    elif format == "zarr":
-        return load_zarr_as_hf_dataset(split_path)
-    else:
-        raise ValueError(f"Unsupported format: {format}")
-
-def generate(model, dataset, rng, batch_size, **kwargs):
+def generate(model, dataset, rng, batch_size, shape, **kwargs):
     def transform(batch):
-        y, A = jnp.array(batch['y']), jnp.array(batch['A'])
+        y, A = batch['y'], batch['A']
         x = sample(model, y, A, rng.split(), **kwargs)
-        x = jnp.array(x)
+        x = x
         return {'x': x}
-    types = {'x': Array3D(shape=(128, 128, 2), dtype='float32')}
+    types = {'x': Array3D(shape=shape, dtype='float32')}
     return dataset.map(
         transform,
         features=Features(types),
@@ -140,17 +117,18 @@ def train(runid: int, lap: int, src: str):
     #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     # Load HuggingFace-formatted LLC4320 dataset
     t0 = time.time()
-    trainset_yA = load_dataset(f"{src}/train", format="zarr")
+    trainset_yA = load_from_disk(f"{src}/train")
+    trainset_yA.set_format("numpy")
     #valset = load_dataset(src / "val", format="zarr")
-    testset_yA = load_dataset(f"{src}/test", format="zarr")
-    print(f"trainset_yA keys: {trainset_yA.column_names}")
-    jax.debug.print(f"[{time.strftime('%X')}] Loaded dataset in {time.time() - t0:.2f} seconds")
+    testset_yA = load_from_disk(f"{src}/test")
+    testset_yA.set_format("numpy")
     #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     # Validation data (fixed samples)
-    y_eval, A_eval = jnp.array(testset_yA[:16]['y']), jnp.array(testset_yA[:16]['A'])
+    y_eval, A_eval = testset_yA[:16]['y'], testset_yA[:16]['A']
     y_eval, A_eval = jax.device_put((y_eval, A_eval), distributed)
     B, H, W, C = y_eval.shape
     D = H * W * C
+    jax.debug.print(f"[{time.strftime('%X')}] Loaded dataset in {time.time() - t0:.2f} seconds")
 
     # If lap >0, load previous checkpoint, else fit prior Gaussian model
     t1 = time.time()
@@ -159,11 +137,12 @@ def train(runid: int, lap: int, src: str):
         jax.debug.print(f"[{time.strftime('%X')}] Loaded previous checkpoint in {time.time() - t1:.2f} seconds")
     else:
         # Shuffle the training dataset for moment fitting
+        N = len(trainset_yA)
         shuffle_seed = hash((runid, "moment_fitting")) % 2**16
-        shuffled_trainset = trainset_yA.shuffle(shuffle_seed)  # Add shuffle method
-        # Now take first N samples (which are actually shuffled)
-        y_fit, A_fit = jnp.array(shuffled_trainset[:6144]['y']), jnp.array(shuffled_trainset[:6144]['A'])
+        indices = np.random.RandomState(shuffle_seed).permutation(N)[:6144]
+        y_fit, A_fit = trainset_yA.select(indices)['y'], trainset_yA.select(indices)['A']
         y_fit, A_fit = jax.device_put((y_fit, A_fit), distributed)
+        jax.debug.print(f"[{time.strftime('%X')}] Loaded shuffled fitting dataset in {time.time() - t0:.2f} seconds")
         B, H, W, C = y_fit.shape
         D = H * W * C
         t1a = time.time()
@@ -200,6 +179,7 @@ def train(runid: int, lap: int, src: str):
         dataset=trainset_yA,
         rng=rng,
         batch_size=config.batch_size,
+        shape=(H, W, C),
         shard=True,
         sampler=config.sampler,
         sde=sde,
@@ -213,6 +193,7 @@ def train(runid: int, lap: int, src: str):
         dataset=testset_yA,
         rng=rng,
         batch_size=config.batch_size,
+        shape = (H, W, C),
         shard=True,
         sampler=config.sampler,
         sde=sde,
@@ -223,7 +204,7 @@ def train(runid: int, lap: int, src: str):
 
     # Fit low-rank covariance (PPCA) on generated training data
     t4 = time.time()
-    x_fit = jnp.array(trainset[:16384]['x'])
+    x_fit = trainset[:16384]['x']
     x_fit = flatten(x_fit)
     mu_x, cov_x = ppca(x_fit, rank=320, key=rng.split())
     del x_fit
@@ -384,7 +365,7 @@ if __name__ == '__main__':
     wandb.login() # type: ignore
     runid = wandb.util.generate_id() # type: ignore
     jobs = []
-    src = "/home/tm3076/scratch/priors_precomputed_datasets/precomputed_data_sst/sst_crho_0.4"
+    src = "/home/tm3076/scratch/hf_priors_precomputed_datasets/precomputed_data_sst/sst_crho_0.4"
 
     # Schedule multiple laps as Slurm jobs
     for lap in range(32):
