@@ -57,6 +57,8 @@ def sample(
 
 def make_model(
     key: Array,
+    in_channels: int = 3,
+    out_channels: int = 3,
     hid_channels: Sequence[int] = (64, 128, 256),
     hid_blocks: Sequence[int] = (3, 3, 3),
     kernel_size: Sequence[int] = (3, 3),
@@ -68,8 +70,8 @@ def make_model(
     init_key, dropout_key = jax.random.split(key)
     return Denoiser(
         network=FlatUNet(
-            in_channels=3,
-            out_channels=3,
+            in_channels=in_channels,
+            out_channels=out_channels,
             hid_channels=hid_channels,
             hid_blocks=hid_blocks,
             kernel_size=kernel_size,
@@ -112,7 +114,7 @@ class FlatUNet(UNet):
 
     def __call__(self, x: Array, t: Array, key: Array = None) -> Array:
         x = unflatten(x, width=128, height=128)
-        x = super().__call__(x, t, key)
+        x = super().__call__(x, t, key=key)
         x = flatten(x)
         return x
 

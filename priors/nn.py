@@ -70,6 +70,9 @@ class Modulation(nn.Module):
 
     @inox.jit
     def __call__(self, t: Array) -> Tuple[Array, Array, Array]:
+        out = self.mlp(t)
+        jax.debug.print("Modulation output shape:", out.shape)  # Debug print
+        jax.debug.print("Modulation output:", out)  # Debug print
         return jnp.array_split(self.mlp(t), 3, axis=-1)
 
 
@@ -94,11 +97,12 @@ class ResBlock(nn.Module):
             nn.Conv(channels, channels, **kwargs),
         )
 
-    def __call__(self, x: Array, t: Array) -> Array:
+    def __call__(self, x: Array, t: Array, key: Array = None) -> Array:
         a, b, c = self.modulation(t)
-
         y = (a + 1) * x + b
-        y = self.block(y)
+        y = self.block(y, key=key)  # Pass key to block (if block supports it)
+        # Note: The block should handle the key internally if needed
+        # If the block does not support key, you can remove the key argument
         y = x + c * y
 
         return y / jnp.sqrt(1 + c**2)
@@ -107,7 +111,13 @@ class ResBlock(nn.Module):
 class AttBlock(nn.Module):
     r"""Creates a residual self-attention block."""
 
-    def __init__(self, channels: int, emb_features: int, heads: int = 1, key: Array = None):
+    def __init__(
+            self, 
+            channels: int, 
+            emb_features: int, 
+            heads: int = 1, 
+            key: Array = None
+    ):
         k1, k2 = jax.random.split(key)
         self.modulation = Modulation(channels, emb_features, key=k1)
         self.norm = nn.LayerNorm()
@@ -120,9 +130,8 @@ class AttBlock(nn.Module):
         )
 
     @inox.checkpoint
-    def __call__(self, x: Array, t: Array) -> Array:
+    def __call__(self, x: Array, t: Array, key: Array = None) -> Array:
         a, b, c = self.modulation(t)
-
         y = (a + 1) * x + b
         y = self.norm(y)
         y = rearrange(y, '... H W C -> ... (H W) C')
@@ -219,25 +228,27 @@ class UNet(nn.Module):
             key: A PRNG key.
         """
         memory = []
+        # Optionally split the key for each block if you want independent randomness per block
+        key_iter = iter(jax.random.split(key, len(self.descent) + len(self.ascent))) if key is not None else None
 
-        for blocks in self.descent:
+        # Down path
+        for i, blocks in enumerate(self.descent):
+            block_key = next(key_iter) if key_iter is not None else None
             for block in blocks:
                 if isinstance(block, (ResBlock, AttBlock)):
-                    x = block(x, t)
+                    x = block(x, t, key=block_key)
                 else:
                     x = block(x)
-
             memory.append(x)
-
-        for blocks in self.ascent:
+        # Up path
+        for i, blocks in enumerate(self.ascent):
             y = memory.pop()
-
             if x is not y:
                 x = jnp.concatenate((x, y), axis=-1)
-
+            block_key = next(key_iter) if key_iter is not None else None
             for block in blocks:
                 if isinstance(block, (ResBlock, AttBlock)):
-                    x = block(x, t)
+                    x = block(x, t, key=block_key)
                 else:
                     x = block(x)
 

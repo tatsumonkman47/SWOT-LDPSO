@@ -292,19 +292,20 @@ def train(runid: int, lap: int, src: str):
         B, H, W, C = y_fit.shape
         D = H * W * C
         t1a = time.time()
-        mu_x, cov_x = fit_moments(
-            features=D, # The dimensionality of the latent variable x
-            rank=320, # This is the low-rank dimension of your approximate posterior or prior covariance matrix
-            shard=True,
-            A=inox.tree.Partial(measure, A_fit, H=H, W=W, C=C),
-            y=flatten(y_fit),
-            cov_y=1e-3**2,
-            sampler='ddim',
-            sde=sde,
-            steps=256,
-            maxiter=None,
-            key=rng.split(),
-        )
+        with inox_random.set_rng(init=inox_random.PRNG(rng.split())):
+            mu_x, cov_x = fit_moments(
+                features=D, # The dimensionality of the latent variable x
+                rank=320, # This is the low-rank dimension of your approximate posterior or prior covariance matrix
+                shard=True,
+                A=inox.tree.Partial(measure, A_fit, H=H, W=W, C=C),
+                y=flatten(y_fit),
+                cov_y=1e-3**2,
+                sampler='ddim',
+                sde=sde,
+                steps=256,
+                maxiter=None,
+                key=rng.split(),
+            )
         print(f"[{time.strftime('%X')}] fit_moments completed in {time.time() - t1a:.2f} seconds")
         del y_fit, A_fit
         previous = GaussianDenoiser(mu_x, cov_x)
@@ -435,10 +436,13 @@ def train(runid: int, lap: int, src: str):
         losses = []
         for batch in prefetch(loader):
             x = batch['x']
+            assert batch['x'] is not None, "Batch x is None!"
+            print("Batch x shape:", batch['x'].shape)
             x = jax.device_put(x, distributed)
             #x = augment(x, rng.split(len(x)))
             x = flatten(x)
-            loss, avrg, params, opt_state = sgd_step(avrg, params, others, opt_state, x, key=rng.split())
+            with inox_random.set_rng(init=inox_random.PRNG(rng.split()), dropout=inox_random.PRNG(rng.split())):
+                loss, avrg, params, opt_state = sgd_step(avrg, params, others, opt_state, x, key=rng.split())
             losses.append(loss)
         loss_train = np.stack(losses).mean()
 
@@ -542,6 +546,5 @@ if __name__ == '__main__':
                 --overlay /scratch/tm3076/singularity_container/EDIT_JAX-cuDNN9.8-overlay-15GB-500K.ext3:ro \
                 /share/apps/images/cuda12.8.1-cudnn9.8.0-ubuntu24.04.2.sif \
                 /bin/bash -c 'export PATH="/opt/slurm/bin:$PATH" && source /ext3/env.sh &&  {python_command}'"""
-
             ) 
-        )   
+        )
