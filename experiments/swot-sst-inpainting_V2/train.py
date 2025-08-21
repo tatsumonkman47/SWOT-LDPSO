@@ -16,7 +16,7 @@ from dawgz import job, schedule # type: ignore
 
 from priors.diffusion import VESDE, DenoiserLoss, GaussianDenoiser
 from priors.data import prefetch
-from priors.image import random_flip, random_hue, random_saturation
+from priors.image import random_flip, random_hue, random_saturation, to_pil
 from priors.common import dump_module, ppca, fit_moments, load_module
 from priors.optim import Adam, EMA
 
@@ -41,7 +41,7 @@ CONFIG = {
     'sde': {'a': 1e-3, 'b': 1e2},
     'heuristic': None,
     'discrete': 256,
-    'maxiter': 1,
+    'maxiter': 10,
     # Training settings
     'epochs': 256,
     'batch_size': 256,
@@ -55,7 +55,6 @@ CONFIG = {
     'ema_decay': 0.9999,
 }
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 import jax.numpy as jnp # type: ignore
 import numpy as np # type: ignore
 import zarr # type: ignore
@@ -63,24 +62,33 @@ import glob
 from pathlib import Path
 import time
 
+def zarr_batch_iterator(array, batch_size, indices=None, drop_last_batch=True):
+    N = array.shape[0]
+    if indices is None:
+        indices = np.arange(N)
+    for start in range(0, N, batch_size):
+        end = min(start + batch_size, N)
+        if drop_last_batch and (end - start) < batch_size:
+            break
+        yield array[indices[start:end]]
 
-def generate(model, dataset, rng, batch_size, shape, **kwargs):
-    def transform(batch):
-        y, A = batch['y'], batch['A']
-        x = sample(model, y, A, rng.split(), **kwargs)
-        x = x
-        return {'x': x}
-    types = {'x': Array3D(shape=shape, dtype='float32')}
-    return dataset.map(
-        transform,
-        features=Features(types),
-        remove_columns=['y', 'A'],
-        keep_in_memory=True,
-        batched=True,
-        batch_size=batch_size,
-        drop_last_batch=True,
-    )
-#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+def zarr_generate(model, dataset, rng, batch_size, shape, **kwargs):
+    """
+    Generate outputs for a dataset (Zarr or dict of arrays) in batches.
+    Returns a dict of arrays, similar to HuggingFace Dataset output.
+    """
+    N = dataset['y'].shape[0]
+    xs = []
+    for start in range(0, N, batch_size):
+        end = min(start + batch_size, N)
+        y_batch = dataset['y'][start:end]
+        A_batch = dataset['A'][start:end]
+        # Call your sample function (ensure it works with numpy arrays)
+        x_batch = sample(model, y_batch, A_batch, rng.split(), **kwargs)
+        xs.append(np.asarray(x_batch))
+    xs = np.concatenate(xs, axis=0)
+    return {'x': xs}
+
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 def train(runid: int, lap: int, src: str):
@@ -117,14 +125,11 @@ def train(runid: int, lap: int, src: str):
     #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     # Load HuggingFace-formatted LLC4320 dataset
     t0 = time.time()
-    trainset_yA = load_from_disk(f"{src}/train")
-    trainset_yA.set_format("numpy")
-    #valset = load_dataset(src / "val", format="zarr")
-    testset_yA = load_from_disk(f"{src}/test")
-    testset_yA.set_format("numpy")
+    trainset_yA = zarr.open_group(f"{src}/train", mode="r")
+    testset_yA = zarr.open_group(f"{src}/train", mode="r")
     #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     # Validation data (fixed samples)
-    y_eval, A_eval = testset_yA[:16]['y'], testset_yA[:16]['A']
+    y_eval, A_eval = testset_yA['y'][:16], testset_yA['A'][:16]
     y_eval, A_eval = jax.device_put((y_eval, A_eval), distributed)
     B, H, W, C = y_eval.shape
     D = H * W * C
@@ -136,7 +141,7 @@ def train(runid: int, lap: int, src: str):
         previous = load_module(runpath / f'checkpoint_{lap - 1}.pkl')
         jax.debug.print(f"[{time.strftime('%X')}] Loaded previous checkpoint in {time.time() - t1:.2f} seconds")
     else:
-        y_fit, A_fit = trainset_yA[:6144]['y'], trainset_yA[:6144]['A']
+        y_fit, A_fit = trainset_yA['y'][:16384], trainset_yA['A'][:16384]
         y_fit, A_fit = jax.device_put((y_fit, A_fit), distributed)
         jax.debug.print(f"[{time.strftime('%X')}] Loaded fitting dataset in {time.time() - t0:.2f} seconds")
         B, H, W, C = y_fit.shape
@@ -153,7 +158,7 @@ def train(runid: int, lap: int, src: str):
                 sampler='ddim',
                 sde=sde,
                 steps=256,
-                maxiter=None,
+                maxiter=10, # Increased for robustness
                 key=rng.split(),
             )
         jax.debug.print(f"[{time.strftime('%X')}] fit_moments completed in {time.time() - t1a:.2f} seconds")
@@ -170,7 +175,7 @@ def train(runid: int, lap: int, src: str):
 
     # Generate synthetic training and testing data (denoised reconstructions)
     t3 = time.time()
-    trainset = generate(
+    trainset = zarr_generate(
         model=previous,
         dataset=trainset_yA,
         rng=rng,
@@ -184,7 +189,7 @@ def train(runid: int, lap: int, src: str):
     )
     print(f"[{time.strftime('%X')}] Generated trainset in {time.time() - t3:.2f} seconds")
     t3b = time.time()
-    testset = generate(
+    testset = zarr_generate(
         model=previous,
         dataset=testset_yA,
         rng=rng,
@@ -200,7 +205,7 @@ def train(runid: int, lap: int, src: str):
 
     # Fit low-rank covariance (PPCA) on generated training data
     t4 = time.time()
-    x_fit = trainset[:16384]['x']
+    x_fit = trainset['x'][:16384]
     x_fit = flatten(x_fit)
     mu_x, cov_x = ppca(x_fit, rank=320, key=rng.split())
     del x_fit
@@ -281,32 +286,27 @@ def train(runid: int, lap: int, src: str):
     for epoch in (bar := trange(config.epochs, ncols=88)):
         epoch_start = time.time()
         # Shuffle training set per epoch
-        loader = trainset.shuffle(seed=seed + lap * config.epochs + epoch).iter(
-            batch_size=config.batch_size, drop_last_batch=True
-        )
-
+        N = trainset['x'].shape[0]  # or whatever your dataset size is
+        shuffle_seed = seed + lap * config.epochs + epoch
+        indices = np.random.RandomState(shuffle_seed).permutation(N)
         losses = []
-        for batch in prefetch(loader):
-            x = batch['x']
-            assert batch['x'] is not None, "Batch x is None!"
-            jax.debug.print("Batch x shape:", batch['x'].shape)
-            x = jax.device_put(x, distributed)
-            #x = augment(x, rng.split(len(x)))
-            x = flatten(x)
+        #for batch in prefetch(loader):
+        for x_batch in prefetch(zarr_batch_iterator(trainset['x'], config.batch_size, indices=indices, drop_last_batch=True)):
+            assert x_batch is not None, "x_batch is None!"
+            x_batch = jax.device_put(x_batch, distributed)
+            x_batch = flatten(x_batch)
             with inox_random.set_rng(init=inox_random.PRNG(rng.split()), dropout=inox_random.PRNG(rng.split())):
-                loss, avrg, params, opt_state = sgd_step(avrg, params, others, opt_state, x, key=rng.split())
+                loss, avrg, params, opt_state = sgd_step(avrg, params, others, opt_state, x_batch, key=rng.split())
             losses.append(loss)
         loss_train = np.stack(losses).mean()
 
         # Validation evaluation
         val_start = time.time()
-        loader = testset.iter(batch_size=config.batch_size, drop_last_batch=True)
         losses = []
-        for batch in prefetch(loader):
-            x = batch['x']
-            x = jax.device_put(x, distributed)
-            x = flatten(x)
-            loss = ell(avrg, others, x, key=rng.split())
+        for x_batch in prefetch(zarr_batch_iterator(testset['x'], config.batch_size, drop_last_batch=True)):
+            x_batch = jax.device_put(x_batch, distributed)
+            x_batch = flatten(x_batch)
+            loss = ell(avrg, others, x_batch, key=rng.split())
             losses.append(loss)
         loss_val = np.stack(losses).mean()
         val_time = time.time() - val_start
@@ -361,7 +361,7 @@ if __name__ == '__main__':
     wandb.login() # type: ignore
     runid = wandb.util.generate_id() # type: ignore
     jobs = []
-    src = "/home/tm3076/scratch/hf_priors_precomputed_datasets/precomputed_data_sst/sst_crho_0.4"
+    src = "/home/tm3076/scratch/priors_precomputed_datasets/precomputed_data_sst/sst_crho_0.4"
 
     # Schedule multiple laps as Slurm jobs
     for lap in range(32):
@@ -380,7 +380,7 @@ if __name__ == '__main__':
         if len(jobs) > 1:
             jobs[-1].after(jobs[-2], status="any")
     
-    dry_run = True
+    dry_run = False
     if dry_run:
         jobs = jobs[:1]
     schedule(

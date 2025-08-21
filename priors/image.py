@@ -33,9 +33,10 @@ def to_pil(
     background: int = 255,
     zoom: int = 1,
     file: Optional[Union[str, Path]] = None,
-) -> Image.Image:
+    cmaps: list = ["viridis"],
+) -> Union[Image.Image, List[Image.Image]]:
     """
-    Convert a batched grid of images into a single PIL Image.
+    Convert a batched grid of images into a single PIL Image or a list of images (one per channel).
 
     x: Array of shape (M, N, H, W, C)
        where:
@@ -43,8 +44,12 @@ def to_pil(
          N: cols in grid
          H: height
          W: width
-         C: channels (1 or 3)
+         C: channels (1 or more)
+    cmap: matplotlib colormap name (used for single-channel images)
     """
+    import matplotlib.pyplot as plt
+    import matplotlib.cm as cm
+
     x = np.asarray(x)
     # Scale to uint8
     x = np.clip((x + 2) * (256 / 4), 0, 255)
@@ -52,27 +57,37 @@ def to_pil(
     # Pad
     x = np.pad(
         x,
-        pad_width=((0,0), (0,0), (pad,pad), (pad,pad), (0,0)),
+        pad_width=((0, 0), (0, 0), (pad, pad), (pad, pad), (0, 0)),
         constant_values=background
     )
-    # Rearrange grid to single large image
-    x = rearrange(x, 'M N H W C -> (M H) (N W) C')
-    # Handle single-channel (grayscale) or multi-channel
-    if x.shape[-1] == 1:
-        img = Image.fromarray(x.squeeze(-1), mode='L')
-    elif x.shape[-1] == 3:
-        img = Image.fromarray(x, mode='RGB')
-    else:
-        raise ValueError(f"Unsupported number of channels: {x.shape[-1]}")
-    # Resize (zoom)
-    if zoom > 1:
-        img = img.resize(
-            (zoom * img.width, zoom * img.height),
-            Image.NEAREST
-        )
+    # Rearrange grid to single large image per channel
+    M, N, H, W, C = x.shape
+    images = []
+    if len(cmaps) < C:
+        cmaps = cmaps * (C // len(cmaps) + 1)
+    for c in range(C):
+        x_c = rearrange(x[..., c], 'M N H W -> (M H) (N W)')
+        cmap_fn = cm.get_cmap(cmaps[c])
+        x_norm = x_c.astype(np.float32) / 255.0
+        x_rgb = (np.array(cmap_fn(x_norm))[..., :3] * 255).astype(np.uint8)
+        img = Image.fromarray(x_rgb, mode='RGB')
+        # Resize (zoom)
+        if zoom > 1:
+            img = img.resize(
+                (zoom * img.width, zoom * img.height),
+                Image.NEAREST
+            )
+        images.append(img)
+
+    # Save images if file is specified
     if file is not None:
-        img.save(file)
-    return img
+        if C == 1:
+            images[0].save(file)
+        else:
+            file = Path(file)
+            for c, img in enumerate(images):
+                img.save(str(file.with_stem(f"{file.stem}_ch{c}")))
+    return images[0] if C == 1 else images
 
 def collate(
     images: List[List[Image.Image]],

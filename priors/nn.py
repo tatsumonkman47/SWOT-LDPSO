@@ -70,9 +70,6 @@ class Modulation(nn.Module):
 
     @inox.jit
     def __call__(self, t: Array) -> Tuple[Array, Array, Array]:
-        out = self.mlp(t)
-        jax.debug.print("Modulation output shape:", out.shape)  # Debug print
-        jax.debug.print("Modulation output:", out)  # Debug print
         return jnp.array_split(self.mlp(t), 3, axis=-1)
 
 
