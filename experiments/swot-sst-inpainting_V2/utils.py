@@ -65,6 +65,7 @@ def make_model(
     emb_features: int = 256,
     heads: Dict[int, int] = {2: 1},
     dropout: Optional[float] = None,
+    checkpoint_layers=(1, 2),
     **absorb,
 ) -> Denoiser:
     init_key, dropout_key = jax.random.split(key)
@@ -78,6 +79,7 @@ def make_model(
             emb_features=emb_features,
             heads=heads,
             dropout=dropout,
+            checkpoint_layers=checkpoint_layers,
             init_key=init_key,
             dropout_key=dropout_key,
         ),
@@ -97,6 +99,7 @@ class FlatUNet(UNet):
         dropout: Optional[float],
         init_key: Array,
         dropout_key: Array,  # You may route this later
+        checkpoint_layers = (1, 2),
     ):
         super().__init__(
             in_channels=in_channels,
@@ -107,6 +110,7 @@ class FlatUNet(UNet):
             emb_features=emb_features,
             heads=heads,
             dropout=dropout,
+            checkpoint_layers=checkpoint_layers,
             key=init_key,
         )
         self.dropout_key = dropout_key  # Store it if needed later

@@ -81,6 +81,7 @@ class ResBlock(nn.Module):
         channels: int,
         emb_features: int,
         dropout: Optional[float] = None,
+        checkpoint: bool = False, # Whether to use checkpointing for memory efficiency
         key: Array = None,
         **kwargs,
     ):
@@ -93,15 +94,23 @@ class ResBlock(nn.Module):
             nn.Identity() if dropout is None else nn.TrainingDropout(dropout),
             nn.Conv(channels, channels, **kwargs),
         )
-
+        self.checkpoint = checkpoint
+    
     def __call__(self, x: Array, t: Array, key: Array = None) -> Array:
+        if self.checkpoint:
+            return self._checkpointed_forward(x, t, key)
+        else:
+            return self._forward(x, t, key)
+
+    @inox.checkpoint
+    def _checkpointed_forward(self, x: Array, t: Array, key: Array = None) -> Array:
+        return self._forward(x, t, key)
+    
+    def _forward(self, x: Array, t: Array, key: Array = None) -> Array:
         a, b, c = self.modulation(t)
         y = (a + 1) * x + b
-        y = self.block(y, key=key)  # Pass key to block (if block supports it)
-        # Note: The block should handle the key internally if needed
-        # If the block does not support key, you can remove the key argument
+        y = self.block(y, key=key)
         y = x + c * y
-
         return y / jnp.sqrt(1 + c**2)
 
 
@@ -152,6 +161,7 @@ class UNet(nn.Module):
         emb_features: int = 64,
         heads: Dict[int, int] = {},
         dropout: Optional[float] = None,
+        checkpoint_layers: Sequence[int] = (1, 2),
         key: Array = None,
     ):
         if key is None:
@@ -170,10 +180,24 @@ class UNet(nn.Module):
         for i, blocks in enumerate(hid_blocks):
             do, up = [], []
 
-            for _ in range(blocks):
-                do.append(ResBlock(hid_channels[i], emb_features, dropout=dropout, key=next(k_iter), **kwargs))
-                up.append(ResBlock(hid_channels[i], emb_features, dropout=dropout, key=next(k_iter), **kwargs))
+            # Checkpoint deeper layers (higher memory usage)
+            use_checkpoint = i in checkpoint_layers
 
+            for _ in range(blocks):
+                do.append(ResBlock(hid_channels[i], 
+                                   emb_features, 
+                                   dropout=dropout, 
+                                   key=next(k_iter), 
+                                   checkpoint=use_checkpoint,
+                                   **kwargs
+                                   ))
+                up.append(ResBlock(hid_channels[i], 
+                                   emb_features, 
+                                   dropout=dropout, 
+                                   key=next(k_iter), 
+                                   checkpoint=use_checkpoint,
+                                   **kwargs
+                                   ))
                 if i in heads:
                     do.append(AttBlock(hid_channels[i], emb_features, heads[i], key=next(k_iter)))
                     up.append(AttBlock(hid_channels[i], emb_features, heads[i], key=next(k_iter)))

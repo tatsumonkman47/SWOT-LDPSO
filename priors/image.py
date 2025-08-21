@@ -47,13 +47,28 @@ def to_pil(
          C: channels (1 or more)
     cmap: matplotlib colormap name (used for single-channel images)
     """
-    import matplotlib.pyplot as plt
-    import matplotlib.cm as cm
+    try:
+        import matplotlib.cm as cm
+    except ImportError:
+        raise ImportError("matplotlib is required for this function. Install with: pip install matplotlib")
 
     x = np.asarray(x)
+    
+    # Debug info to help diagnose monochrome images
+    jax.debug.print(f"Input shape: {x.shape}")
+    jax.debug.print(f"Input range: [{x.min():.4f}, {x.max():.4f}]")
+    jax.debug.print(f"Input mean: {x.mean():.4f}")
+    jax.debug.print(f"Input std: {x.std():.4f}")
+    
+    # Check if input is effectively constant
+    if np.allclose(x, x.flat[0]):
+        jax.debug.print("WARNING: Input array has constant values - this will produce monochrome images")
+    
     # Scale to uint8
-    x = np.clip((x + 2) * (256 / 4), 0, 255)
-    x = np.rint(x).astype(np.uint8)
+    x_scaled = np.clip((x + 2) * (256 / 4), 0, 255)
+    jax.debug.print(f"After scaling range: [{x_scaled.min():.4f}, {x_scaled.max():.4f}]")
+    
+    x = np.rint(x_scaled).astype(np.uint8)
     # Pad
     x = np.pad(
         x,
@@ -61,15 +76,19 @@ def to_pil(
         constant_values=background
     )
     # Rearrange grid to single large image per channel
-    M, N, H, W, C = x.shape
+    _, _, _, _, C = x.shape
     images = []
-    if len(cmaps) < C:
-        cmaps = cmaps * (C // len(cmaps) + 1)
     for c in range(C):
         x_c = rearrange(x[..., c], 'M N H W -> (M H) (N W)')
-        cmap_fn = cm.get_cmap(cmaps[c])
+        
+        # Use modulo to handle cases where c >= len(cmaps)
+        cmap_name = cmaps[c % len(cmaps)]
+        cmap_fn = cm.get_cmap(cmap_name)
+        
         x_norm = x_c.astype(np.float32) / 255.0
-        x_rgb = (np.array(cmap_fn(x_norm))[..., :3] * 255).astype(np.uint8)
+        x_rgb_array = cmap_fn(x_norm)
+        x_rgb = (x_rgb_array[:, :, :3] * 255).astype(np.uint8)
+        
         img = Image.fromarray(x_rgb, mode='RGB')
         # Resize (zoom)
         if zoom > 1:

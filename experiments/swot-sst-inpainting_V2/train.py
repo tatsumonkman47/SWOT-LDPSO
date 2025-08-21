@@ -36,6 +36,7 @@ CONFIG = {
     'emb_features': 256,
     'heads': {1: 4},
     'dropout': 0.1,
+    'checkpoint_layers': (1,2),
     # Diffusion sampling
     'sampler': 'ddpm',
     'sde': {'a': 1e-3, 'b': 1e2},
@@ -44,7 +45,7 @@ CONFIG = {
     'maxiter': 10,
     # Training settings
     'epochs': 256,
-    'batch_size': 256,
+    'batch_size': 340,
     'scheduler': 'constant',
     'lr_init': 2e-4,
     'lr_end': 1e-6,
@@ -72,22 +73,34 @@ def zarr_batch_iterator(array, batch_size, indices=None, drop_last_batch=True):
             break
         yield array[indices[start:end]]
 
+
 def zarr_generate(model, dataset, rng, batch_size, shape, **kwargs):
-    """
-    Generate outputs for a dataset (Zarr or dict of arrays) in batches.
-    Returns a dict of arrays, similar to HuggingFace Dataset output.
-    """
+    """Generate outputs for a dataset (Zarr or dict of arrays) in batches.
+    Returns a dict of arrays, similar to HuggingFace Dataset output."""
     N = dataset['y'].shape[0]
+    num_gpus = len(jax.devices())
     xs = []
     for start in range(0, N, batch_size):
         end = min(start + batch_size, N)
+        current_batch_size = end - start
         y_batch = dataset['y'][start:end]
         A_batch = dataset['A'][start:end]
-        # Call your sample function (ensure it works with numpy arrays)
+        # Pad to make divisible by num_gpus if needed
+        if current_batch_size % num_gpus != 0:
+            pad_size = num_gpus - (current_batch_size % num_gpus)
+            # Repeat last samples to pad
+            y_pad = np.repeat(y_batch[-1:], pad_size, axis=0)
+            A_pad = np.repeat(A_batch[-1:], pad_size, axis=0)
+            y_batch = np.concatenate([y_batch, y_pad], axis=0)
+            A_batch = np.concatenate([A_batch, A_pad], axis=0)
         x_batch = sample(model, y_batch, A_batch, rng.split(), **kwargs)
+        # Remove padding from output
+        if current_batch_size % num_gpus != 0:
+            x_batch = x_batch[:current_batch_size]
         xs.append(np.asarray(x_batch))
     xs = np.concatenate(xs, axis=0)
     return {'x': xs}
+
 
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -111,6 +124,7 @@ def train(runid: int, lap: int, src: str):
 
     # Enable partitioning for reproducible RNG across shards
     jax.config.update('jax_threefry_partitionable', True)
+    jax.config.update('jax_enable_x64', False)  # Use float32 everywhere
     mesh = jax.sharding.Mesh(jax.devices(), 'i')
     replicated = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
     distributed = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec('i'))
@@ -158,7 +172,7 @@ def train(runid: int, lap: int, src: str):
                 sampler='ddim',
                 sde=sde,
                 steps=256,
-                maxiter=10, # Increased for robustness
+                maxiter=CONFIG.get('maxiter',10), # Increased for robustness
                 key=rng.split(),
             )
         jax.debug.print(f"[{time.strftime('%X')}] fit_moments completed in {time.time() - t1a:.2f} seconds")
@@ -201,7 +215,7 @@ def train(runid: int, lap: int, src: str):
         steps=config.discrete,
         maxiter=config.maxiter,
     )
-    print(f"[{time.strftime('%X')}] Generated testset in {time.time() - t3b:.2f} seconds")
+    jax.debug.print(f"[{time.strftime('%X')}] Generated testset in {time.time() - t3b:.2f} seconds")
 
     # Fit low-rank covariance (PPCA) on generated training data
     t4 = time.time()
@@ -279,7 +293,11 @@ def train(runid: int, lap: int, src: str):
         params = optax.apply_updates(params, updates)
         avrg = ema(avrg, params)
         return loss, avrg, params, opt_state
-
+    
+    # Check memory usage
+    for i, device in enumerate(jax.devices()):
+        memory_info = device.memory_stats()
+        print(f"GPU {i}: {memory_info['bytes_in_use'] / 1e9:.1f}GB used")
     print(f"[{time.strftime('%X')}] Setup complete, entering training loop. Total setup time: {time.time() - start_time:.2f} seconds")
 
     # Training loop over epochs
