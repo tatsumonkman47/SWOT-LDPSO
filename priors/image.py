@@ -33,7 +33,7 @@ def to_pil(
     background: int = 255,
     zoom: int = 1,
     file: Optional[Union[str, Path]] = None,
-    cmaps: list = ["viridis"],
+    cmaps: list = ["Spectral_r","seismic"],
 ) -> Union[Image.Image, List[Image.Image]]:
     """
     Convert a batched grid of images into a single PIL Image or a list of images (one per channel).
