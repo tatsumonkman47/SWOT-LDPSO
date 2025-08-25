@@ -98,7 +98,7 @@ class FlatUNet(UNet):
         heads: Dict[int, int],
         dropout: Optional[float],
         init_key: Array,
-        dropout_key: Array,  # You may route this later
+        dropout_key: Array,
         checkpoint_layers = (1, 2),
     ):
         super().__init__(
@@ -113,13 +113,25 @@ class FlatUNet(UNet):
             checkpoint_layers=checkpoint_layers,
             key=init_key,
         )
-        self.dropout_key = dropout_key  # Store it if needed later
-        # Split and pass to child modules here
 
     def __call__(self, x: Array, t: Array, key: Array = None) -> Array:
+        from inox import random as inox_random
         x = unflatten(x, width=128, height=128)
-        x = super().__call__(x, t, key=key)
+        # Check if we're in training mode and handle RNG accordingly
+        if hasattr(self, 'training') and not self.training:
+            # In eval mode, don't worry about dropout RNG
+            x = super().__call__(x, t, key=key)
+        else:
+            # In training mode, ensure RNG context exists
+            try:
+                # Check if dropout context already exists
+                inox_random.get_rng("dropout")
+                x = super().__call__(x, t, key=key)
+            except:
+                # No context exists, but we need one for dropout layers
+                # Use a deterministic fallback key
+                fallback_key = jax.random.PRNGKey(0) if key is None else key
+                with inox_random.set_rng(dropout=inox_random.PRNG(fallback_key)):
+                    x = super().__call__(x, t, key=key)
         x = flatten(x)
         return x
-
-
