@@ -186,7 +186,7 @@ class Denoiser(nn.Module):
         network: A noise conditional network.
     """
 
-    def __init__(self, network: nn.Module, emb_features: int = 64):
+    def __init__(self, network: nn.Module, emb_features: int = 64, **kwargs):
         self.net = network
         self.emb = PosEmbedding(emb_features)
 

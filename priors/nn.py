@@ -2,6 +2,7 @@ r"""Neural networks"""
 
 import inox # type: ignore
 import inox.nn as nn # type: ignore # type: ignore
+from inox.random import PRNG, get_rng, set_rng # type: ignore
 import jax.numpy as jnp # type: ignore
 
 from einops import rearrange # type: ignore
@@ -85,14 +86,14 @@ class ResBlock(nn.Module):
         key: Array = None,
         **kwargs,
     ):
-        k1, k2 = jax.random.split(key)
+        k1, k2, k3 = jax.random.split(key, num=3)
         self.modulation = Modulation(channels, emb_features, key=k1)
         self.block = nn.Sequential(
             nn.LayerNorm(),
             nn.Conv(channels, channels, key=k2, **kwargs),
             nn.SiLU(),
             nn.Identity() if dropout is None else nn.TrainingDropout(dropout),
-            nn.Conv(channels, channels, **kwargs),
+            nn.Conv(channels, channels, key=k3, **kwargs),
         )
         self.checkpoint = checkpoint
     
@@ -165,8 +166,8 @@ class UNet(nn.Module):
         key: Array = None,
     ):
         if key is None:
-           raise ValueError("init_key must be passed explicitly") 
-        key = jax.random.split(key, sum(hid_blocks) * 4)  # 4 keys per block max
+            get_rng().split()
+        key = jax.random.split(key, sum(hid_blocks) * 6 + len(heads) * 4 + 10) # Overallocate keys for safety
         k_iter = iter(key)
 
         stride = [2 for k in kernel_size]
@@ -224,8 +225,8 @@ class UNet(nn.Module):
                     )
                 )
             else:
-                do.insert(0, nn.Conv(in_channels, hid_channels[i], **kwargs))
-                up.append(nn.Linear(hid_channels[i], out_channels))
+                do.insert(0, nn.Conv(in_channels, hid_channels[i], key=next(k_iter), **kwargs))
+                up.append(nn.Linear(hid_channels[i], out_channels, key=next(k_iter),))
 
             if i + 1 < len(hid_blocks):
                 up.insert(

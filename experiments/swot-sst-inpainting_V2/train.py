@@ -76,16 +76,12 @@ def zarr_batch_iterator(array, batch_size, indices=None, drop_last_batch=True):
         yield array[indices[start:end]]
 
 def zarr_generate(model, dataset, rng, batch_size, shape, num_gpus, **kwargs):
-    """Generate outputs for a dataset (Zarr or dict of arrays) in batches.
-    Returns a dict of arrays, similar to HuggingFace Dataset output."""
-    # Ensure model is in evaluation mode
+    """Generate outputs for a dataset (Zarr or dict of arrays) in batches."""
+    # Force eval mode during generation
+    original_training = getattr(model, 'training', True)
     model.train(False)
     N = dataset['y'].shape[0]
     xs = []
-    # Pre-generate all RNG keys needed for the entire generation process
-    total_batches = (N + batch_size - 1) // batch_size
-    all_keys = rng.split(total_batches * 4)  # 4 keys per batch
-    key_idx = 0
     for start in range(0, N, batch_size):
         end = min(start + batch_size, N)
         current_batch_size = end - start
@@ -98,23 +94,19 @@ def zarr_generate(model, dataset, rng, batch_size, shape, num_gpus, **kwargs):
             A_pad = np.repeat(A_batch[-1:], pad_size, axis=0)
             y_batch = np.concatenate([y_batch, y_pad], axis=0)
             A_batch = np.concatenate([A_batch, A_pad], axis=0)
-        # Use pre-generated keys and maintain comprehensive RNG context
-        batch_keys = all_keys[key_idx:key_idx+4]
-        key_idx += 4
-        # CRITICAL: Set ALL possible RNG contexts that might be needed
+        # Set comprehensive RNG context for all possible needs
         with inox_random.set_rng(
-            init=inox_random.PRNG(batch_keys[0]),
-            dropout=inox_random.PRNG(batch_keys[1]),
-            # Add other contexts that might be needed by your model
+            init=inox_random.PRNG(rng.split()),
+            dropout=inox_random.PRNG(rng.split()),
         ):
-            x_batch = sample(model, y_batch, A_batch, batch_keys[2], **kwargs)
+            x_batch = sample(model, y_batch, A_batch, rng.split(), **kwargs)
         # Remove padding from output
         if current_batch_size % num_gpus != 0:
             x_batch = x_batch[:current_batch_size]
         xs.append(np.asarray(x_batch))
     xs = np.concatenate(xs, axis=0)
-    # Restore training mode
-    model.train(True)
+    # Restore original training mode
+    model.train(original_training)
     return {'x': xs}
 
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -180,24 +172,33 @@ def train(runid: int, lap: int, src: str):
     t1 = time.time()
     
     if lap > 0:
+        """
         jax.debug.print(f"[{time.strftime('%X')}] TRAIN DEBUG: Loading parameters-only checkpoint")
         checkpoint_path = runpath / f'checkpoint_{lap - 1}.pkl'
         with open(checkpoint_path, 'rb') as f:
             checkpoint_data = pickle.load(f)
         jax.debug.print(f"[{time.strftime('%X')}] TRAIN DEBUG: Checkpoint data loaded, creating fresh model")
-        # CRITICAL FIX: Create model WITHOUT RNG context to avoid trace/runtime mismatch
-        # Only the model structure is created here - no actual computations
+        # Create a completely fresh model (no RNG context needed for structure creation)
         previous = make_model(key=rng.split(), in_channels=C, out_channels=C, **CONFIG)
         jax.debug.print(f"[{time.strftime('%X')}] TRAIN DEBUG: Fresh model created, setting attributes")
-        # Set attributes (these don't need RNG contexts)
+        # Set model attributes
         previous.mu_x = checkpoint_data['mu_x']
         if checkpoint_data['cov_x'] is not None:
             previous.cov_x = checkpoint_data['cov_x']
         jax.debug.print(f"[{time.strftime('%X')}] TRAIN DEBUG: Model attributes set, loading parameters")
-        # Load parameters (this doesn't require RNG either - it's just array assignment)
+        # Load saved parameters into fresh model
         static_part, _ = previous.partition()
         previous = static_part(checkpoint_data['params'])
+        previous.train(False)
         jax.debug.print(f"[{time.strftime('%X')}] TRAIN DEBUG: Parameters loaded successfully")
+        """
+        """
+        jax.debug.print(f"[{time.strftime('%X')}] TRAIN DEBUG: Loading full model checkpoint")
+        checkpoint_path = runpath / f'checkpoint_{lap - 1}.pkl'
+        # Use the original's simple approach - just load the pickled model
+        previous = load_module(checkpoint_path)
+        jax.debug.print(f"[{time.strftime('%X')}] TRAIN DEBUG: Model loaded successfully")
+        """
     else:
         y_fit, A_fit = trainset_yA['y'][:16384], trainset_yA['A'][:16384]
         y_fit, A_fit = jax.device_put((y_fit, A_fit), distributed)
@@ -274,11 +275,11 @@ def train(runid: int, lap: int, src: str):
 
     # Initialize model
     t5 = time.time()
+
     if lap > 0:
         model = previous
     else:
-        with inox_random.set_rng(init=inox_random.PRNG(rng.split()), dropout=inox_random.PRNG(rng.split())):
-            model = make_model(key=rng.split(), in_channels=C, out_channels=C, **CONFIG) 
+        model = make_model(key=rng.split(), in_channels=C, out_channels=C, **CONFIG)
     print(f"[{time.strftime('%X')}] Model initialized in {time.time() - t5:.2f} seconds")
 
     # Set model's prior mean
@@ -295,22 +296,17 @@ def train(runid: int, lap: int, src: str):
         model.cov_x = cov_x
 
     model.train(True)
-
     # Partition model parameters
     static, params, others = model.partition(nn.Parameter)
-
     # Define denoising loss
     objective = DenoiserLoss(sde=sde)
-
     # Build optimizer
     steps = config.epochs * len(trainset_yA) // config.batch_size
     optimizer = Adam(steps=steps, **config)
     opt_state = optimizer.init(params)
-
     # Exponential moving average for parameter stabilization
     ema = EMA(decay=config.ema_decay)
     avrg = params
-
     # Put everything onto devices
     avrg, params, others, opt_state = jax.device_put((avrg, params, others, opt_state), replicated)
 
@@ -360,8 +356,8 @@ def train(runid: int, lap: int, src: str):
             assert x_batch is not None, "x_batch is None!"
             x_batch = jax.device_put(x_batch, distributed)
             x_batch = flatten(x_batch)
-            with inox_random.set_rng(init=inox_random.PRNG(rng.split()), dropout=inox_random.PRNG(rng.split())):
-                loss, avrg, params, opt_state = sgd_step(avrg, params, others, opt_state, x_batch, key=rng.split())
+            #with inox_random.set_rng(init=inox_random.PRNG(rng.split()), dropout=inox_random.PRNG(rng.split())):
+            loss, avrg, params, opt_state = sgd_step(avrg, params, others, opt_state, x_batch, key=rng.split())
             losses.append(loss)
         loss_train = np.stack(losses).mean()
 

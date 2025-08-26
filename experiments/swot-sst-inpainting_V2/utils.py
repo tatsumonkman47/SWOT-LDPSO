@@ -1,5 +1,6 @@
 r"""CIFAR experiment helpers"""
 import inox # type: ignore
+import inox.random as inox_random # type: ignore
 import inox.nn as nn # type: ignore
 import jax # type: ignore
 from jax import Array # type: ignore
@@ -41,17 +42,22 @@ def sample(
 
     B, H, W, C = y.shape
     D = H * W * C
-
-    x = sample_any(
-        model=model,
-        shape=flatten(y).shape,
-        shard=shard,
-        A=inox.tree.Partial(measure, A, H=H, W=W, C=C),
-        y=flatten(y),
-        cov_y=1e-3**2,
-        key=key,
-        **kwargs,
-    )
+    # Always set RNG context for sampling operations
+    # This handles both dropout and any other RNG needs
+    with inox_random.set_rng(
+        init=inox_random.PRNG(key),
+        dropout=inox_random.PRNG(key),
+    ):
+        x = sample_any(
+            model=model,
+            shape=flatten(y).shape,
+            shard=shard,
+            A=inox.tree.Partial(measure, A, H=H, W=W, C=C),
+            y=flatten(y),
+            cov_y=1e-3**2,
+            key=key,
+            **kwargs,
+        )
 
     return unflatten(x, H, W)
 
@@ -68,7 +74,8 @@ def make_model(
     checkpoint_layers=(1, 2),
     **absorb,
 ) -> Denoiser:
-    init_key, dropout_key = jax.random.split(key)
+    # Split the key for different components
+    network_key, denoiser_key = jax.random.split(key, 2)
     return Denoiser(
         network=FlatUNet(
             in_channels=in_channels,
@@ -80,58 +87,15 @@ def make_model(
             heads=heads,
             dropout=dropout,
             checkpoint_layers=checkpoint_layers,
-            init_key=init_key,
-            dropout_key=dropout_key,
+            key=network_key,  # ← ADD THIS LINE
         ),
         emb_features=emb_features,
+        #key=denoiser_key,  # ← AND THIS LINE IF DENOISER NEEDS IT
     )
 
 class FlatUNet(UNet):
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        hid_channels: Sequence[int],
-        hid_blocks: Sequence[int],
-        kernel_size: Sequence[int],
-        emb_features: int,
-        heads: Dict[int, int],
-        dropout: Optional[float],
-        init_key: Array,
-        dropout_key: Array,
-        checkpoint_layers = (1, 2),
-    ):
-        super().__init__(
-            in_channels=in_channels,
-            out_channels=out_channels,
-            hid_channels=hid_channels,
-            hid_blocks=hid_blocks,
-            kernel_size=kernel_size,
-            emb_features=emb_features,
-            heads=heads,
-            dropout=dropout,
-            checkpoint_layers=checkpoint_layers,
-            key=init_key,
-        )
-
     def __call__(self, x: Array, t: Array, key: Array = None) -> Array:
-        from inox import random as inox_random
         x = unflatten(x, width=128, height=128)
-        # Check if we're in training mode and handle RNG accordingly
-        if hasattr(self, 'training') and not self.training:
-            # In eval mode, don't worry about dropout RNG
-            x = super().__call__(x, t, key=key)
-        else:
-            # In training mode, ensure RNG context exists
-            try:
-                # Check if dropout context already exists
-                inox_random.get_rng("dropout")
-                x = super().__call__(x, t, key=key)
-            except:
-                # No context exists, but we need one for dropout layers
-                # Use a deterministic fallback key
-                fallback_key = jax.random.PRNGKey(0) if key is None else key
-                with inox_random.set_rng(dropout=inox_random.PRNG(fallback_key)):
-                    x = super().__call__(x, t, key=key)
+        x = super().__call__(x, t, key)  # No RNG context management!
         x = flatten(x)
         return x
