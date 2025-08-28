@@ -79,7 +79,12 @@ def zarr_generate(model, dataset, rng, batch_size, shape, num_gpus, **kwargs):
     """Generate outputs for a dataset (Zarr or dict of arrays) in batches."""
     # Force eval mode during generation
     original_training = getattr(model, 'training', True)
-    model.train(False)
+    # Set eval mode with proper RNG context
+    with inox_random.set_rng(
+        init=inox_random.PRNG(rng.split()),
+        dropout=inox_random.PRNG(rng.split()),
+    ):
+        model.train(False)
     N = dataset['y'].shape[0]
     xs = []
     for start in range(0, N, batch_size):
@@ -94,19 +99,24 @@ def zarr_generate(model, dataset, rng, batch_size, shape, num_gpus, **kwargs):
             A_pad = np.repeat(A_batch[-1:], pad_size, axis=0)
             y_batch = np.concatenate([y_batch, y_pad], axis=0)
             A_batch = np.concatenate([A_batch, A_pad], axis=0)
-        # Set comprehensive RNG context for all possible needs
+        # Fresh RNG context for each batch
+        batch_rng = rng.split()
         with inox_random.set_rng(
-            init=inox_random.PRNG(rng.split()),
-            dropout=inox_random.PRNG(rng.split()),
+            init=inox_random.PRNG(batch_rng),
+            dropout=inox_random.PRNG(jax.random.split(batch_rng)[1]),
         ):
-            x_batch = sample(model, y_batch, A_batch, rng.split(), **kwargs)
+            x_batch = sample(model, y_batch, A_batch, jax.random.split(batch_rng)[0], **kwargs)
         # Remove padding from output
         if current_batch_size % num_gpus != 0:
             x_batch = x_batch[:current_batch_size]
         xs.append(np.asarray(x_batch))
     xs = np.concatenate(xs, axis=0)
-    # Restore original training mode
-    model.train(original_training)
+    # Restore original training mode with RNG context
+    with inox_random.set_rng(
+        init=inox_random.PRNG(rng.split()),
+        dropout=inox_random.PRNG(rng.split()),
+    ):
+        model.train(original_training)
     return {'x': xs}
 
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -172,33 +182,16 @@ def train(runid: int, lap: int, src: str):
     t1 = time.time()
     
     if lap > 0:
-        """
-        jax.debug.print(f"[{time.strftime('%X')}] TRAIN DEBUG: Loading parameters-only checkpoint")
         checkpoint_path = runpath / f'checkpoint_{lap - 1}.pkl'
-        with open(checkpoint_path, 'rb') as f:
-            checkpoint_data = pickle.load(f)
-        jax.debug.print(f"[{time.strftime('%X')}] TRAIN DEBUG: Checkpoint data loaded, creating fresh model")
-        # Create a completely fresh model (no RNG context needed for structure creation)
-        previous = make_model(key=rng.split(), in_channels=C, out_channels=C, **CONFIG)
-        jax.debug.print(f"[{time.strftime('%X')}] TRAIN DEBUG: Fresh model created, setting attributes")
-        # Set model attributes
-        previous.mu_x = checkpoint_data['mu_x']
-        if checkpoint_data['cov_x'] is not None:
-            previous.cov_x = checkpoint_data['cov_x']
-        jax.debug.print(f"[{time.strftime('%X')}] TRAIN DEBUG: Model attributes set, loading parameters")
-        # Load saved parameters into fresh model
-        static_part, _ = previous.partition()
-        previous = static_part(checkpoint_data['params'])
-        previous.train(False)
-        jax.debug.print(f"[{time.strftime('%X')}] TRAIN DEBUG: Parameters loaded successfully")
-        """
-        """
-        jax.debug.print(f"[{time.strftime('%X')}] TRAIN DEBUG: Loading full model checkpoint")
-        checkpoint_path = runpath / f'checkpoint_{lap - 1}.pkl'
-        # Use the original's simple approach - just load the pickled model
-        previous = load_module(checkpoint_path)
-        jax.debug.print(f"[{time.strftime('%X')}] TRAIN DEBUG: Model loaded successfully")
-        """
+        # Load the model with proper RNG context
+        with inox_random.set_rng(
+            init=inox_random.PRNG(rng.split()),
+            dropout=inox_random.PRNG(rng.split()),
+        ):
+            previous = load_module(checkpoint_path)
+            # Ensure the model is in eval mode initially
+            previous.train(False)
+        jax.debug.print(f"[{time.strftime('%X')}] Model loaded successfully")
     else:
         y_fit, A_fit = trainset_yA['y'][:16384], trainset_yA['A'][:16384]
         y_fit, A_fit = jax.device_put((y_fit, A_fit), distributed)
@@ -426,7 +419,7 @@ def train(runid: int, lap: int, src: str):
     t_save = time.time()
     model = static(avrg, others)
     model.train(False)
-    
+    """
     # Save only parameters, not the full model
     static_part, params_part = model.partition()
     checkpoint_data = {
@@ -441,7 +434,7 @@ def train(runid: int, lap: int, src: str):
         pickle.dump(checkpoint_data, f)
     """
     dump_module(model, runpath / f'checkpoint_{lap}.pkl')
-    """
+    
     print(f"[{time.strftime('%X')}] Saved checkpoint in {time.time() - t_save:.2f} seconds")
 
 if __name__ == '__main__':
