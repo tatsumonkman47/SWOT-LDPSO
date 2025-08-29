@@ -39,14 +39,20 @@ def sample(
 ) -> Array:
     if shard:
         y, A = distribute((y, A))
+
     B, H, W, C = y.shape
-    D = H * W * C
+    
     # Split the key for different RNG purposes
     key1, key2, key3 = jax.random.split(key, 3)
+    
+    # Create fresh PRNG instances for this sampling operation
+    sample_init_rng = inox.random.PRNG(key1)
+    sample_dropout_rng = inox.random.PRNG(key2)
+    
     # Always set comprehensive RNG context for sampling operations
-    with inox_random.set_rng(
-        init=inox_random.PRNG(key1),
-        dropout=inox_random.PRNG(key2),
+    with inox.random.set_rng(
+        init=sample_init_rng,
+        dropout=sample_dropout_rng,
     ):
         x = sample_any(
             model=model,
@@ -58,6 +64,7 @@ def sample(
             key=key3,
             **kwargs,
         )
+
     return unflatten(x, H, W)
 
 def make_model(

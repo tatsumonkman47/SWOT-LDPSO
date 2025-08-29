@@ -1,0 +1,28 @@
+[18:22:59] DEBUG: Starting zarr_generate diagnostics...
+[18:22:59] DEBUG: Python PID: 2201610
+[18:22:59] DEBUG: === Testing individual components ===
+[18:22:59] DEBUG: === Testing zarr_generate components ===
+[18:23:04] DEBUG: Step 1: Test model creation
+[18:23:09] DEBUG: Model created
+[18:23:09] DEBUG: Step 2: Test single sample call
+[18:28:07] DEBUG: ✅ Single sample successful: (2, 128, 128, 1)
+[18:28:07] DEBUG: Step 3: Test zarr_generate with minimal data
+[18:33:25] DEBUG: ✅ Minimal zarr_generate successful: (8, 128, 128, 1)
+[18:33:25] DEBUG: ✅ Component test passed
+[18:33:25] DEBUG: === Testing with loaded checkpoint model ===
+[18:33:25] DEBUG: === Testing zarr_generate with loaded checkpoint model ===
+[18:33:25] DEBUG: Step 1: Load dataset
+[18:33:30] DEBUG: Dataset loaded: shape (16, 128, 128, 1)
+[18:33:30] DEBUG: Step 2: Create SDE and load checkpoint model within RNG context
+[18:33:30] DEBUG: SDE created
+[18:33:30] DEBUG: Loading checkpoint: runs/lucky-lion-188_4etgjfko/checkpoint_0.pkl
+[18:33:30] DEBUG: Checkpoint loaded successfully
+[18:33:30] DEBUG: Step 3: Prepare model for zarr_generate (like training script)
+[18:33:30] DEBUG: Model partitioned and moved to device
+[18:33:30] DEBUG: Step 4: Test zarr_generate with SMALL batch first
+[18:33:30] DEBUG: Number of GPUs: 4
+[18:33:30] DEBUG: About to call zarr_generate with small dataset...
+[18:33:30] DEBUG: Dataset shapes: y=(32, 128, 128, 1), A=(32, 128, 128, 1)
+[18:42:16] DEBUG: ✅ zarr_generate completed successfully in 525.51 seconds!
+[18:42:16] DEBUG: Generated shape: (32, 128, 128, 1)
+[18:42:16] DEBUG: ✅ All zarr_generate tests passed!

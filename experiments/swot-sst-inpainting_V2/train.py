@@ -21,6 +21,7 @@ from priors.common import dump_module, ppca, fit_moments, load_module
 from priors.optim import Adam, EMA
 
 from functools import partial
+import tqdm
 from tqdm import trange
 from typing import Dict, List, Tuple, Optional, Union, Any, Callable
 from utils import make_model, sample, measure, PATH          # Assumed utility functions (augmentations, flatten, sampling, etc.)
@@ -44,12 +45,13 @@ CONFIG = {
     'checkpoint_layers': (),
     # Fit moments for prior Gaussian model
     'cov_y': 1e-4**2, # From 1e-3**2, Expected observation noise covariance, should match the actual noise level in the data
+    'fit_moments_maxiter': 10,
     # Diffusion sampling
     'sampler': 'ddpm',
     'sde': {'a': 1e-4, 'b': 1e2}, # Variance Exploding SDE parameters. 'a' is the noise level, 'b' is the diffusion coefficient.
     'heuristic': None,
     'discrete': 256,
-    'maxiter': 10,
+    'diff_maxiter': 2,
     # Generation settings
     'generation_batch_size': 128,
     # Training settings
@@ -87,7 +89,7 @@ def zarr_generate(model, dataset, rng, batch_size, shape, num_gpus, **kwargs):
         model.train(False)
     N = dataset['y'].shape[0]
     xs = []
-    for start in range(0, N, batch_size):
+    for start in (bar := trange(0, N, batch_size, desc="Generating batches", ncols=88)):
         end = min(start + batch_size, N)
         current_batch_size = end - start
         y_batch = dataset['y'][start:end]
@@ -119,6 +121,37 @@ def zarr_generate(model, dataset, rng, batch_size, shape, num_gpus, **kwargs):
         model.train(original_training)
     return {'x': xs}
 
+
+def load_checkpoint_with_rng_context(checkpoint_path, C, init_rng, dropout_rng):
+    """Load checkpoint with proper RNG context management."""
+    # Clear global RNG state before loading
+    inox.random.INOX_RNG.clear()
+    with inox.random.set_rng(
+        init=init_rng,
+        dropout=dropout_rng,
+    ):
+        # Load the checkpoint
+        with open(checkpoint_path, 'rb') as f:
+            checkpoint_data = pickle.load(f)
+        # Create fresh model instance
+        previous = make_model(
+            key=init_rng.split(), 
+            in_channels=C, 
+            out_channels=C, 
+            **CONFIG
+        )
+        # Load saved parameters
+        previous.mu_x = checkpoint_data['mu_x']
+        if checkpoint_data.get('cov_x') is not None:
+            previous.cov_x = checkpoint_data['cov_x']
+        # Apply loaded parameters
+        static_part, _ = previous.partition()
+        previous = static_part(checkpoint_data['params'])
+        # Set to eval mode
+        previous.train(False)
+        return previous, checkpoint_data
+
+
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 def train(runid: int, lap: int, src: str):
@@ -129,13 +162,28 @@ def train(runid: int, lap: int, src: str):
     # Force early logging before ANY JAX operations
     # Initialize Weights & Biases
     start_time = time.time()
-    run = wandb.init( # type: ignore
-        project='priors-SST-mask',
-        id=runid,
-        resume='allow',
-        dir=PATH,
-        config=CONFIG,
-    )
+    # REPLACE the wandb.init section with:
+    if lap == 0:
+        # First lap - create new run
+        run = wandb.init(
+            project='priors-SST-mask',
+            id=runid,
+            resume='never',  # Ensure fresh start for lap 0
+            dir=PATH,
+            config=CONFIG,
+            name=f'training_{runid}',
+            tags=['multi_lap_training', f'lap_{lap}']
+        )
+    else:
+        # Subsequent laps - resume existing run
+        run = wandb.init(
+            project='priors-SST-mask',
+            id=runid,  # SAME ID as lap 0
+            resume='must',  # Must resume existing run
+            dir=PATH,
+            # Don't pass config again for resumed runs
+            tags=[f'lap_{lap}']  # Add lap-specific tag
+        )
     runpath = PATH / f'runs/{run.name}_{run.id}'
     runpath.mkdir(parents=True, exist_ok=True)
     config = run.config
@@ -147,6 +195,7 @@ def train(runid: int, lap: int, src: str):
     os.environ['JAX_TRACEBACK_FILTERING'] = 'off'
     jax.config.update('jax_compilation_cache_dir', '/tmp')
     jax.config.update('jax_persistent_cache_min_entry_size_bytes', -1)
+    
     print(f"TRAIN DEBUG: JAX config set", flush=True)
     print(f"Starting Lap {lap} with runid {runid}")
     print(f"Source directory: {src}")
@@ -159,47 +208,68 @@ def train(runid: int, lap: int, src: str):
     distributed = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec('i'))
 
     # Initialize PRNG with lap-specific seed
-    seed = hash((runpath, lap)) % 2**16
-    rng = inox.random.PRNG(seed)
-
-    # Create the SDE object (Variance Exploding SDE)
-    sde = VESDE(**CONFIG.get('sde'))
+    base_seed = hash((runpath, lap)) % 2**16
     
-    #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-    # Load HuggingFace-formatted LLC4320 dataset
-    t0 = time.time()
-    trainset_yA = zarr.open_group(f"{src}/train", mode="r")
-    testset_yA = zarr.open_group(f"{src}/train", mode="r")
-    #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-    # Validation data (fixed samples)
-    y_eval, A_eval = testset_yA['y'][:16], testset_yA['A'][:16]
-    y_eval, A_eval = jax.device_put((y_eval, A_eval), distributed)
-    B, H, W, C = y_eval.shape
-    D = H * W * C
-    jax.debug.print(f"[{time.strftime('%X')}] Loaded dataset in {time.time() - t0:.2f} seconds")
-
-    # If lap >0, load previous checkpoint, else fit prior Gaussian model
-    t1 = time.time()
+    # Create multiple RNG streams for different purposes
+    main_rng = inox.random.PRNG(base_seed)
+    init_rng = inox.random.PRNG(main_rng.split())
+    dropout_rng = inox.random.PRNG(main_rng.split())
+    sampling_rng = inox.random.PRNG(main_rng.split())
     
-    if lap > 0:
-        checkpoint_path = runpath / f'checkpoint_{lap - 1}.pkl'
-        # Load the model with proper RNG context
-        with inox_random.set_rng(
-            init=inox_random.PRNG(rng.split()),
-            dropout=inox_random.PRNG(rng.split()),
-        ):
-            previous = load_module(checkpoint_path)
-            # Ensure the model is in eval mode initially
-            previous.train(False)
-        jax.debug.print(f"[{time.strftime('%X')}] Model loaded successfully")
-    else:
-        y_fit, A_fit = trainset_yA['y'][:16384], trainset_yA['A'][:16384]
-        y_fit, A_fit = jax.device_put((y_fit, A_fit), distributed)
-        jax.debug.print(f"[{time.strftime('%X')}] Loaded fitting dataset in {time.time() - t0:.2f} seconds")
-        B, H, W, C = y_fit.shape
+    # CRITICAL: Clear any existing global RNG state
+    # inox.random.INOX_RNG.clear()
+
+    # Set initial RNG context for model creation/loading
+    with inox.random.set_rng(
+        init=init_rng,
+        dropout=dropout_rng,
+    ):
+        # Create the SDE object (Variance Exploding SDE)
+        sde = VESDE(**CONFIG.get('sde'))
+        
+        #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+        # Load HuggingFace-formatted LLC4320 dataset
+        t0 = time.time()
+        trainset_yA = zarr.open_group(f"{src}/train", mode="r")
+        testset_yA = zarr.open_group(f"{src}/train", mode="r")
+        #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+        # Validation data (fixed samples)
+        y_eval, A_eval = testset_yA['y'][:16], testset_yA['A'][:16]
+        y_eval, A_eval = jax.device_put((y_eval, A_eval), distributed)
+        B, H, W, C = y_eval.shape
         D = H * W * C
-        t1a = time.time()
-        with inox_random.set_rng(init=inox_random.PRNG(rng.split())):
+        jax.debug.print(f"[{time.strftime('%X')}] Loaded dataset in {time.time() - t0:.2f} seconds")
+
+        # If lap >0, load previous checkpoint, else fit prior Gaussian model
+        t1 = time.time()
+        # Usage in your main training function:
+        if lap > 0:
+            checkpoint_path = runpath / f'checkpoint_{lap - 1}.pkl'
+            # REMOVE the extra RNG creation and nested context
+            # Instead, use the existing RNG context directly
+            with open(checkpoint_path, 'rb') as f:
+                checkpoint_data = pickle.load(f)
+            previous = make_model(
+                key=init_rng.split(), 
+                in_channels=C, 
+                out_channels=C, 
+                **CONFIG
+            )
+            previous.mu_x = checkpoint_data['mu_x']
+            if checkpoint_data.get('cov_x') is not None:
+                previous.cov_x = checkpoint_data['cov_x']
+            static_part, _ = previous.partition()
+            previous = static_part(checkpoint_data['params'])
+            previous.train(False)
+            print(f"[{time.strftime('%X')}] Model loaded successfully from lap {lap-1}")
+
+        else:
+            y_fit, A_fit = trainset_yA['y'][:16384], trainset_yA['A'][:16384]
+            y_fit, A_fit = jax.device_put((y_fit, A_fit), distributed)
+            jax.debug.print(f"[{time.strftime('%X')}] Loaded fitting dataset in {time.time() - t0:.2f} seconds")
+            B, H, W, C = y_fit.shape
+            D = H * W * C
+            t1a = time.time()
             mu_x, cov_x = fit_moments(
                 features=D, # The dimensionality of the latent variable x
                 rank=320, # This is the low-rank dimension of your approximate posterior or prior covariance matrix
@@ -210,13 +280,13 @@ def train(runid: int, lap: int, src: str):
                 sampler='ddim',
                 sde=sde,
                 steps=256,
-                maxiter=CONFIG.get('maxiter',10), # Increased for robustness
-                key=rng.split(),
+                maxiter=CONFIG.get('fit_moments_maxiter',10), # Increased for robustness
+                key=main_rng.split(),
             )
-        jax.debug.print(f"[{time.strftime('%X')}] fit_moments completed in {time.time() - t1a:.2f} seconds")
-        del y_fit, A_fit
-        previous = GaussianDenoiser(mu_x, cov_x)
-        jax.debug.print(f"[{time.strftime('%X')}] GaussianDenoiser created in {time.time() - t1:.2f} seconds")
+            jax.debug.print(f"[{time.strftime('%X')}] fit_moments completed in {time.time() - t1a:.2f} seconds")
+            del y_fit, A_fit
+            previous = GaussianDenoiser(mu_x, cov_x)
+            jax.debug.print(f"[{time.strftime('%X')}] GaussianDenoiser created in {time.time() - t1:.2f} seconds")
 
     # Prepare the previous model for sampling new training targets
     t2 = time.time()
@@ -231,7 +301,7 @@ def train(runid: int, lap: int, src: str):
     trainset = zarr_generate(
         model=previous,
         dataset=trainset_yA,
-        rng=rng,
+        rng=main_rng,
         batch_size=config.generation_batch_size,
         shape=(H, W, C),
         num_gpus=num_gpus,
@@ -239,14 +309,14 @@ def train(runid: int, lap: int, src: str):
         sampler=config.sampler,
         sde=sde,
         steps=config.discrete,
-        maxiter=config.maxiter,
+        maxiter=config.diff_maxiter,
     )
     print(f"[{time.strftime('%X')}] Generated trainset in {time.time() - t3:.2f} seconds")
     t3b = time.time()
     testset = zarr_generate(
         model=previous,
         dataset=testset_yA,
-        rng=rng,
+        rng=main_rng,
         batch_size=config.generation_batch_size,
         shape = (H, W, C),
         num_gpus=num_gpus,
@@ -254,7 +324,7 @@ def train(runid: int, lap: int, src: str):
         sampler=config.sampler,
         sde=sde,
         steps=config.discrete,
-        maxiter=config.maxiter,
+        maxiter=config.diff_maxiter,
     )
     jax.debug.print(f"[{time.strftime('%X')}] Generated testset in {time.time() - t3b:.2f} seconds")
 
@@ -262,7 +332,7 @@ def train(runid: int, lap: int, src: str):
     t4 = time.time()
     x_fit = trainset['x'][:16384]
     x_fit = flatten(x_fit)
-    mu_x, cov_x = ppca(x_fit, rank=320, key=rng.split())
+    mu_x, cov_x = ppca(x_fit, rank=320, key=main_rng.split())
     del x_fit
     print(f"[{time.strftime('%X')}] PPCA fit in {time.time() - t4:.2f} seconds")
 
@@ -272,7 +342,7 @@ def train(runid: int, lap: int, src: str):
     if lap > 0:
         model = previous
     else:
-        model = make_model(key=rng.split(), in_channels=C, out_channels=C, **CONFIG)
+        model = make_model(key=main_rng.split(), in_channels=C, out_channels=C, **CONFIG)
     print(f"[{time.strftime('%X')}] Model initialized in {time.time() - t5:.2f} seconds")
 
     # Set model's prior mean
@@ -341,7 +411,7 @@ def train(runid: int, lap: int, src: str):
         epoch_start = time.time()
         # Shuffle training set per epoch
         N = trainset['x'].shape[0]  # or whatever your dataset size is
-        shuffle_seed = seed + lap * config.epochs + epoch
+        shuffle_seed = base_seed + lap * config.epochs + epoch
         indices = np.random.RandomState(shuffle_seed).permutation(N)
         losses = []
         #for batch in prefetch(loader):
@@ -350,7 +420,7 @@ def train(runid: int, lap: int, src: str):
             x_batch = jax.device_put(x_batch, distributed)
             x_batch = flatten(x_batch)
             #with inox_random.set_rng(init=inox_random.PRNG(rng.split()), dropout=inox_random.PRNG(rng.split())):
-            loss, avrg, params, opt_state = sgd_step(avrg, params, others, opt_state, x_batch, key=rng.split())
+            loss, avrg, params, opt_state = sgd_step(avrg, params, others, opt_state, x_batch, key=main_rng.split())
             losses.append(loss)
         loss_train = np.stack(losses).mean()
 
@@ -360,7 +430,7 @@ def train(runid: int, lap: int, src: str):
         for x_batch in prefetch(zarr_batch_iterator(testset['x'], config.batch_size, drop_last_batch=True)):
             x_batch = jax.device_put(x_batch, distributed)
             x_batch = flatten(x_batch)
-            loss = ell(avrg, others, x_batch, key=rng.split())
+            loss = ell(avrg, others, x_batch, key=main_rng.split())
             losses.append(loss)
         loss_val = np.stack(losses).mean()
         val_time = time.time() - val_start
@@ -375,7 +445,7 @@ def train(runid: int, lap: int, src: str):
                 model=model,
                 y=y_eval,
                 A=A_eval,
-                key=rng.split(),
+                key=main_rng.split(),
                 shard=True,
                 sampler=config.sampler,
                 steps=config.discrete,
@@ -395,6 +465,8 @@ def train(runid: int, lap: int, src: str):
                 'epoch_time': time.time() - epoch_start,
                 'val_time': val_time,
                 'sample_time': time.time() - sample_start,
+                'lap': lap,  # Add lap info
+                'global_epoch': lap * config.epochs + epoch,
             }
             # Handle single image or multiple channels
             if isinstance(pil_images, list):
@@ -412,6 +484,8 @@ def train(runid: int, lap: int, src: str):
                 'loss_val': loss_val,
                 'epoch_time': time.time() - epoch_start,
                 'val_time': val_time,
+                'lap': lap,
+                'global_epoch': lap*config.epochs + epoch,
             })
             jax.debug.print(f"[{time.strftime('%X')}] Epoch {epoch+1}: train_loss={loss_train:.4f}, val_loss={loss_val:.4f}, epoch_time={time.time() - epoch_start:.2f}s, val_time={val_time:.2f}s")
 
@@ -419,7 +493,7 @@ def train(runid: int, lap: int, src: str):
     t_save = time.time()
     model = static(avrg, others)
     model.train(False)
-    """
+    
     # Save only parameters, not the full model
     static_part, params_part = model.partition()
     checkpoint_data = {
@@ -434,7 +508,7 @@ def train(runid: int, lap: int, src: str):
         pickle.dump(checkpoint_data, f)
     """
     dump_module(model, runpath / f'checkpoint_{lap}.pkl')
-    
+    """
     print(f"[{time.strftime('%X')}] Saved checkpoint in {time.time() - t_save:.2f} seconds")
 
 if __name__ == '__main__':
