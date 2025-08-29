@@ -1,0 +1,74 @@
+sde:
+  a: 0.0001
+  b: 100.0
+model:
+  hid_channels:
+  - 128
+  - 256
+  - 384
+  hid_blocks:
+  - 5
+  - 5
+  - 5
+  kernel_size:
+  - 3
+  - 3
+  emb_features: 256
+  heads:
+    1: 4
+  dropout: 0.1
+  checkpoint_layers: []
+training:
+  epochs: 64
+  batch_size: 304
+  cov_y: 1.0e-08
+  fit_moments_maxiter: 10
+  fit_moments_method: cg
+  ema_decay: 0.9999
+  heuristic: null
+  sample_interval: 16
+optimizer:
+  scheduler: constant
+  lr_init: 0.0002
+  lr_end: 1.0e-06
+  lr_warmup: 0.0
+  optimizer: adam
+  weight_decay: null
+  clip: 1.0
+generate:
+  method: cg
+  diff_maxiter: 1
+  verbose: false
+  sampler: ddpm
+  discrete: 256
+  batch_size: 128
+wandb:
+  project: priors-SST-mask
+  tags: []
+slurm:
+  name: 001_cg_1-iter_test
+  max_jobs: 2
+  dry_run: false
+  dry_run_scheduler: true
+  cpus: 4
+  gpus: 4
+  ram: 128GB
+  time: 1-00:00:00
+  partition: h200
+  singularity: 'singularity exec --nv \
+
+    --bind /opt/slurm:/opt/slurm \
+
+    --bind /var/run/munge:/var/run/munge \
+
+    --overlay /scratch/tm3076/singularity_container/EDIT_JAX-cuDNN9.8-overlay-15GB-500K.ext3:ro
+    \
+
+    /share/apps/images/cuda12.8.1-cudnn9.8.0-ubuntu24.04.2.sif \
+
+    /bin/bash -c ''export PATH="/opt/slurm/bin:$PATH" && unset XLA_FLAGS && unset
+    CUDA_CACHE_PATH && source /ext3/env.sh &&  {python_command}''
+
+    '
+data:
+  src: /home/tm3076/scratch/priors_precomputed_datasets/precomputed_data_sst/sst_crho_0.4

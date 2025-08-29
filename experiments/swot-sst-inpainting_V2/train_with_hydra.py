@@ -12,6 +12,11 @@ import sys
 import os
 import pickle
 
+# Hydra imports
+import hydra
+from hydra import compose, initialize
+from omegaconf import DictConfig, OmegaConf
+
 # Workflow management
 from dawgz import job, schedule # type: ignore
 from priors.diffusion import VESDE, DenoiserLoss, GaussianDenoiser
@@ -21,127 +26,12 @@ from priors.common import dump_module, ppca, fit_moments, load_module
 from priors.optim import Adam, EMA
 
 from functools import partial
+import tqdm
 from tqdm import trange
 from typing import Dict, List, Tuple, Optional, Union, Any, Callable
 from utils import make_model, sample, measure, PATH          # Assumed utility functions (augmentations, flatten, sampling, etc.)
 import zarr # type: ignore
 import time
-
-# Configuration dictionary defining hyperparameters and architecture
-
-#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-CONFIG = {
-    # Data corruption level (percentage of masked pixels)
-    #'corruption': 75,
-    # Model architecture
-    'hid_channels': (128, 256, 384),
-    'hid_blocks': (5, 5, 5),
-    'kernel_size': (3, 3),
-    'emb_features': 256,
-    'heads': {1: 4},
-    'dropout': 0.1,
-    'checkpoint_layers': (),
-    # Fit moments for prior Gaussian model
-    'cov_y': 1e-4**2, # From 1e-3**2, Expected observation noise covariance, should match the actual noise level in the data
-    'fit_moments_maxiter': 10,
-    # Diffusion sampling plus linear operator settings
-    'sampler': 'ddpm',
-    'sde': {'a': 1e-4, 'b': 1e2}, # Variance Exploding SDE parameters. 'a' is the noise level, 'b' is the diffusion coefficient.
-    'heuristic': None,
-    'discrete': 256,
-    'diff_maxiter': 50,
-    'verbose': False,
-    'solver_method': 'bicgstab',
-    #'solver_method': 'cg',
-    # Generation settings
-    'generation_batch_size': 128,
-    # Training settings
-    'epochs': 256,
-    'batch_size': 304,
-    'scheduler': 'constant',
-    'lr_init': 2e-4,
-    'lr_end': 1e-6,
-    'lr_warmup': 0.0,
-    'optimizer': 'adam',
-    'weight_decay': None,
-    'clip': 1.0,
-    'ema_decay': 0.9999,
-
-    # Scheduler settings
-    'max_jobs': 32,  # Total number of training laps (jobs) to schedule
-    'name': 'swot-sst-inpainting_V2',
-}
-
-CONFIG_TEST_1 = CONFIG.copy()
-CONFIG_TEST_1.update({
-    'epochs': 2,
-    'fit_moments_maxiter': 5,
-    'diff_maxiter': 5,
-    'solver_method': 'cg',
-    'verbose': True,
-    'name': 'cg_5-iter_short-test',
-    'max_jobs': 2,
-})
-
-CONFIG_TEST_2 = CONFIG.copy()
-CONFIG_TEST_2.update({
-    'epochs': 2,
-    'fit_moments_maxiter': 5,
-    'diff_maxiter': 5,
-    'solver_method': 'bicgstab',
-    'verbose': True,
-    'name': 'bicgstab_5-iter_short-test',
-    'max_jobs': 2,
-})
-
-CONFIG_TEST_3 = CONFIG.copy()
-CONFIG_TEST_3.update({
-    'epochs': 2,
-    'fit_moments_maxiter': 5,
-    'diff_maxiter': 50,
-    'solver_method': 'cg',
-    'verbose': False,
-    'name': 'cg_50-iter_short-test',
-    'max_jobs': 2,
-})
-
-CONFIG_TEST_4 = CONFIG.copy()
-CONFIG_TEST_4.update({
-    'epochs': 2,
-    'fit_moments_maxiter': 5,
-    'diff_maxiter': 50,
-    'solver_method': 'bicgstab',
-    'verbose': False,
-    'name': 'bicgstab_50-iter_short-test',
-    'max_jobs': 2,
-})
-
-CONFIG_TEST_5 = CONFIG.copy()
-CONFIG_TEST_5.update({
-    'epochs': 256,
-    'fit_moments_maxiter': 5,
-    'diff_maxiter': 50,
-    'solver_method': 'cg',
-    'verbose': False,
-    'name': 'cg_50-iter_long-test',
-    'max_jobs': 32,
-})
-
-CONFIG_TEST_6 = CONFIG.copy()
-CONFIG_TEST_6.update({
-    'epochs': 256,
-    'fit_moments_maxiter': 5,
-    'diff_maxiter': 50,
-    'solver_method': 'bicgstab',
-    'verbose': False,
-    'name': 'bicgstab_50-iter_long-test',
-    'max_jobs': 32,
-})
-
-CONFIGS = [CONFIG_TEST_1, CONFIG_TEST_2, CONFIG_TEST_3, CONFIG_TEST_4, CONFIG_TEST_5, CONFIG_TEST_6]
-CONFIG = CONFIGS[5]  # Change index to select different test configurations
-
 
 def zarr_batch_iterator(array, batch_size, indices=None, drop_last_batch=True):
     N = array.shape[0]
@@ -187,7 +77,7 @@ def zarr_generate(model, dataset, rng, batch_size, shape, num_gpus, **kwargs):
 
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-def train(runid: int, lap: int, src: str):
+def train(cfg: DictConfig, runid: str, lap: int, src: str):
     """
     Main training loop for a single training 'lap' (iteration).
     Each lap can be seen as one cycle of training, optionally starting from a prior checkpoint.
@@ -199,22 +89,22 @@ def train(runid: int, lap: int, src: str):
     if lap == 0:
         # First lap - create new run
         run = wandb.init(
-            project='priors-SST-mask',
+            project=cfg.wandb.project,
             id=runid,
             resume='never',  # Ensure fresh start for lap 0
             dir=PATH,
-            config=CONFIG,
+            config=OmegaConf.to_container(cfg, resolve=True),
             name=None,  # Let wandb generate the name first
-            tags=['multi_lap_training', f'lap_{lap}']
+            tags=['multi_lap_training', f'lap_{lap}'] + cfg.wandb.tags
         )
         # Get the auto-generated name and modify it
         auto_name = run.name
-        custom_name = f'{auto_name}_{CONFIG.get("name")}_{runid}'
+        custom_name = f'{auto_name}_{cfg.slurm.name}_{runid}'
         run.name = custom_name
     else:
         # Subsequent laps - resume existing run
         run = wandb.init(
-            project='priors-SST-mask',
+            project=cfg.wandb.project,
             id=runid,  # SAME ID as lap 0
             resume='must',  # Must resume existing run
             dir=PATH,
@@ -254,7 +144,7 @@ def train(runid: int, lap: int, src: str):
     sampling_rng = inox.random.PRNG(main_rng.split())
 
     # Create the SDE object (Variance Exploding SDE)
-    sde = VESDE(**CONFIG.get('sde'))
+    sde = VESDE(**cfg.sde)
     
     #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     # Load HuggingFace-formatted LLC4320 dataset
@@ -278,7 +168,7 @@ def train(runid: int, lap: int, src: str):
         with open(checkpoint_path, 'rb') as f:
             checkpoint_data = pickle.load(f)
         # Create model once
-        model = make_model(key=init_rng.split(), in_channels=C, out_channels=C, **CONFIG)
+        model = make_model(key=init_rng.split(), in_channels=C, out_channels=C, **cfg.model)
         # Load parameters
         model.mu_x = checkpoint_data['mu_x']
         if checkpoint_data.get('cov_x') is not None:
@@ -302,13 +192,13 @@ def train(runid: int, lap: int, src: str):
             shard=True,
             A=inox.tree.Partial(measure, A_fit, H=H, W=W, C=C),
             y=flatten(y_fit),
-            cov_y=CONFIG.get('cov_y', 1e-3**2), # Expected observation noise covariance
+            cov_y=cfg.training.cov_y, # Expected observation noise covariance
             sampler='ddim',
             sde=sde,
             steps=256,
-            maxiter=CONFIG.get('fit_moments_maxiter',10), # Increased for robustness
+            maxiter=cfg.training.fit_moments_maxiter, # Increased for robustness
             key=main_rng.split(),
-            method=CONFIG.get('solver_method','cg'),
+            method=cfg.training.fit_moments_method,
         )
         jax.debug.print(f"[{time.strftime('%X')}] fit_moments completed in {time.time() - t1a:.2f} seconds")
         del y_fit, A_fit
@@ -329,16 +219,16 @@ def train(runid: int, lap: int, src: str):
         model=previous,
         dataset=trainset_yA,
         rng=main_rng,
-        batch_size=config.generation_batch_size,
+        batch_size=cfg.generate.batch_size,
         shape=(H, W, C),
         num_gpus=num_gpus,
         shard=True,
-        sampler=config.sampler,
+        sampler=cfg.generate.sampler,
         sde=sde,
-        steps=config.discrete,
-        maxiter=config.diff_maxiter,
-        verbose=config.verbose,
-        method=CONFIG.get('solver_method','cg'),
+        steps=cfg.generate.discrete,
+        maxiter=cfg.generate.diff_maxiter,
+        verbose=cfg.generate.verbose,
+        method=cfg.generate.method,
     )
     print(f"[{time.strftime('%X')}] Generated trainset in {time.time() - t3:.2f} seconds")
     t3b = time.time()
@@ -346,16 +236,16 @@ def train(runid: int, lap: int, src: str):
         model=previous,
         dataset=testset_yA,
         rng=main_rng,
-        batch_size=config.generation_batch_size,
+        batch_size=cfg.generate.batch_size,
         shape = (H, W, C),
         num_gpus=num_gpus,
         shard=True,
-        sampler=config.sampler,
+        sampler=cfg.generate.sampler,
         sde=sde,
-        steps=config.discrete,
-        maxiter=config.diff_maxiter,
-        verbose=config.verbose,
-        method=CONFIG.get('solver_method','cg'),
+        steps=cfg.generate.discrete,
+        maxiter=cfg.generate.diff_maxiter,
+        verbose=cfg.generate.verbose,
+        method=cfg.generate.method,
     )
     jax.debug.print(f"[{time.strftime('%X')}] Generated testset in {time.time() - t3b:.2f} seconds")
 
@@ -373,20 +263,20 @@ def train(runid: int, lap: int, src: str):
     if lap > 0:
         model = previous
     else:
-        model = make_model(key=main_rng.split(), in_channels=C, out_channels=C, **CONFIG)
+        model = make_model(key=main_rng.split(), in_channels=C, out_channels=C, **cfg.model)
     model.train(True)
     print(f"[{time.strftime('%X')}] Model initialized in {time.time() - t5:.2f} seconds")
 
     # Set model's prior mean
     model.mu_x = mu_x
     # Configure model's covariance heuristic
-    if config.heuristic == 'zeros':
+    if cfg.training.heuristic == 'zeros':
         model.cov_x = jnp.zeros_like(mu_x)
-    elif config.heuristic == 'ones':
+    elif cfg.training.heuristic == 'ones':
         model.cov_x = jnp.ones_like(mu_x)
-    elif config.heuristic == 'cov_t':
+    elif cfg.training.heuristic == 'cov_t':
         model.cov_x = jnp.ones_like(mu_x) * 1e6
-    elif config.heuristic == 'cov_x':
+    elif cfg.training.heuristic == 'cov_x':
         model.cov_x = cov_x
 
     # Partition model parameters
@@ -394,11 +284,11 @@ def train(runid: int, lap: int, src: str):
     # Define denoising loss
     objective = DenoiserLoss(sde=sde)
     # Build optimizer
-    steps = config.epochs * len(trainset_yA) // config.batch_size
-    optimizer = Adam(steps=steps, **config)
+    steps = cfg.training.epochs * len(trainset_yA) // cfg.training.batch_size
+    optimizer = Adam(steps=steps, **cfg.optimizer)
     opt_state = optimizer.init(params)
     # Exponential moving average for parameter stabilization
-    ema = EMA(decay=config.ema_decay)
+    ema = EMA(decay=cfg.training.ema_decay)
     avrg = params
     # Put everything onto devices
     avrg, params, others, opt_state = jax.device_put((avrg, params, others, opt_state), replicated)
@@ -437,15 +327,15 @@ def train(runid: int, lap: int, src: str):
     print(f"[{time.strftime('%X')}] Setup complete, entering training loop. Total setup time: {time.time() - start_time:.2f} seconds")
 
     # Training loop over epochs
-    for epoch in (bar := trange(config.epochs, ncols=88)):
+    for epoch in (bar := trange(cfg.training.epochs, ncols=88)):
         epoch_start = time.time()
         # Shuffle training set per epoch
         N = trainset['x'].shape[0]  # or whatever your dataset size is
-        shuffle_seed = base_seed + lap * config.epochs + epoch
+        shuffle_seed = base_seed + lap * cfg.training.epochs + epoch
         indices = np.random.RandomState(shuffle_seed).permutation(N)
         losses = []
         #for batch in prefetch(loader):
-        for x_batch in prefetch(zarr_batch_iterator(trainset['x'], config.batch_size, indices=indices, drop_last_batch=True)):
+        for x_batch in prefetch(zarr_batch_iterator(trainset['x'], cfg.training.batch_size, indices=indices, drop_last_batch=True)):
             assert x_batch is not None, "x_batch is None!"
             x_batch = jax.device_put(x_batch, distributed)
             x_batch = flatten(x_batch)
@@ -456,7 +346,7 @@ def train(runid: int, lap: int, src: str):
         # Validation evaluation
         val_start = time.time()
         losses = []
-        for x_batch in prefetch(zarr_batch_iterator(testset['x'], config.batch_size, drop_last_batch=True)):
+        for x_batch in prefetch(zarr_batch_iterator(testset['x'], cfg.training.batch_size, drop_last_batch=True)):
             x_batch = jax.device_put(x_batch, distributed)
             x_batch = flatten(x_batch)
             loss = ell(avrg, others, x_batch, key=main_rng.split())
@@ -466,7 +356,7 @@ def train(runid: int, lap: int, src: str):
         bar.set_postfix(loss=loss_train, loss_val=loss_val)
 
         # Every 16 epochs, sample validation images and log to wandb
-        if (epoch + 1) % 16 == 0:
+        if (epoch + 1) % cfg.training.sample_interval == 0:
             sample_start = time.time()
             model = static(avrg, others)
             model.train(False)
@@ -476,9 +366,9 @@ def train(runid: int, lap: int, src: str):
                 A=A_eval,
                 key=main_rng.split(),
                 shard=True,
-                sampler=config.sampler,
-                steps=config.discrete,
-                maxiter=config.diff_maxiter,
+                sampler=cfg.generate.name,
+                steps=cfg.generate.discrete,
+                maxiter=cfg.generate.diff_maxiter,
             )
             model.train(True)  # Restore training mode if continuing to train
             num = x.shape[0]
@@ -495,7 +385,7 @@ def train(runid: int, lap: int, src: str):
                 'val_time': val_time,
                 'sample_time': time.time() - sample_start,
                 'lap': lap,  # Add lap info
-                'global_epoch': lap * config.epochs + epoch,
+                'global_epoch': lap * cfg.training.epochs + epoch,
             }
             # Handle single image or multiple channels
             if isinstance(pil_images, list):
@@ -514,7 +404,7 @@ def train(runid: int, lap: int, src: str):
                 'epoch_time': time.time() - epoch_start,
                 'val_time': val_time,
                 'lap': lap,
-                'global_epoch': lap*config.epochs + epoch,
+                'global_epoch': lap*cfg.training.epochs + epoch,
             })
             jax.debug.print(f"[{time.strftime('%X')}] Epoch {epoch+1}: train_loss={loss_train:.4f}, val_loss={loss_val:.4f}, epoch_time={time.time() - epoch_start:.2f}s, val_time={val_time:.2f}s")
 
@@ -531,7 +421,7 @@ def train(runid: int, lap: int, src: str):
         'mu_x': model.mu_x,  # Save the prior mean
         'cov_x': getattr(model, 'cov_x', None),  # Save covariance if it exists
         'lap': lap,
-        'config': dict(CONFIG),  # Save config for reconstruction
+        'config': OmegaConf.to_container(cfg, resolve=True),  # Save config for reconstruction
     }
     with open(runpath / f'checkpoint_lap{lap:02d}.pkl', 'wb') as f:
         pickle.dump(checkpoint_data, f)
@@ -540,24 +430,24 @@ def train(runid: int, lap: int, src: str):
     """
     print(f"[{time.strftime('%X')}] Saved checkpoint in {time.time() - t_save:.2f} seconds")
 
-if __name__ == '__main__':
+@hydra.main(version_base=None, config_path="conf", config_name="config")
+def main(cfg: DictConfig) -> None:
     wandb.login() # type: ignore
     runid = wandb.util.generate_id() # type: ignore
     jobs = []
-    src = "/home/tm3076/scratch/priors_precomputed_datasets/precomputed_data_sst/sst_crho_0.4"
-    #src = "/home/tm3076/scratch/priors_precomputed_datasets/precomputed_data_sshsst/sshsst_swot_nadir_crho_0.3"
-
+    src = cfg.data.src
+    
     # Schedule multiple laps as Slurm jobs
-    for lap in range(0,32):
+    for lap in range(0, cfg.slurm.max_jobs):
         jobs.append(
             job(
-                partial(train, runid=runid, lap=lap, src=src),
+                partial(train, cfg=cfg, runid=runid, lap=lap, src=src),
                 name=f'train_{lap}',
-                cpus=4,
-                gpus=4,
-                ram='128GB',
-                time='1-00:00:00',
-                partition='h200',
+                cpus=cfg.slurm.cpus,
+                gpus=cfg.slurm.gpus,
+                ram=cfg.slurm.ram,
+                time=cfg.slurm.time,
+                partition=cfg.slurm.partition,
                 #delay="00:05:00",
                 #wrap='\"hostname && sleep infinity\"'
            )
@@ -565,19 +455,17 @@ if __name__ == '__main__':
         if len(jobs) > 1:
             jobs[-1].after(jobs[-2], status="success")
     
-    dry_run = False
-    dry_run_scheduler = True
-    if dry_run:
+    if cfg.slurm.dry_run:
         jobs = jobs[:1]
-    if dry_run_scheduler:
-        jobs = jobs[:CONFIG.get('max_jobs',32)]
+    if cfg.slurm.dry_run_scheduler:
+        jobs = jobs[:cfg.slurm.max_jobs]
 
     # Add debug prints to see what DAWGZ is actually doing
     print(f"DAWGZ DEBUG: Created {len(jobs)} jobs")
-    for i, job in enumerate(jobs):
-        print(f"DAWGZ DEBUG: Job {i}: {job}")
-        if hasattr(job, 'dependencies'):
-            print(f"DAWGZ DEBUG: Job {i} dependencies: {job.dependencies}")
+    for i, job_i in enumerate(jobs):
+        print(f"DAWGZ DEBUG: Job {i}: {job_i}")
+        if hasattr(job_i, 'dependencies'):
+            print(f"DAWGZ DEBUG: Job {i} dependencies: {job_i.dependencies}")
 
     schedule(
         *jobs,
@@ -587,13 +475,8 @@ if __name__ == '__main__':
         export='ALL',
         env=['export WANDB_SILENT=true'],
         dry_run=False,
-        singularity=(
-                """singularity exec --nv \
-                --bind /opt/slurm:/opt/slurm \
-                --bind /var/run/munge:/var/run/munge \
-                --overlay /scratch/tm3076/singularity_container/EDIT_JAX-cuDNN9.8-overlay-15GB-500K.ext3:ro \
-                /share/apps/images/cuda12.8.1-cudnn9.8.0-ubuntu24.04.2.sif \
-                /bin/bash -c 'export PATH="/opt/slurm/bin:$PATH" && unset XLA_FLAGS && unset CUDA_CACHE_PATH && source /ext3/env.sh &&  {python_command}'"""
-            ) 
-        )
+        singularity=cfg.slurm.singularity
+    )
 
+if __name__ == '__main__':
+    main()
