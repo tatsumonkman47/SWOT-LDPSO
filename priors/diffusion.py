@@ -332,6 +332,7 @@ class PosteriorDenoiser(nn.Module):
 
     @inox.jit
     def __call__(self, xt: Array, sigma_t: Array, key: Array = None) -> Array:
+        
         cov_t = sigma_t[..., None] ** 2
 
         x, vjp = jax.vjp(lambda xt: self.model(xt, sigma_t, key), xt)
@@ -339,10 +340,12 @@ class PosteriorDenoiser(nn.Module):
         At = transpose(A, x)
 
         if self.cov_x is None:
-            cov_y_xt = lambda v: self.cov_y @ v + cov_t * A(*vjp(At(v)))
+            #cov_y_xt = lambda v: self.cov_y @ v + cov_t * A(*vjp(At(v)))
+            cov_y_xt = lambda v: self.cov_y @ v + cov_t * A(*vjp(At(v))) + 1e-6 * v # Tikhonov regularization
         else:
             cov_x_xt = cov_t + (-(cov_t**2)) * (self.cov_x + cov_t).inv
-            cov_y_xt = lambda v: self.cov_y @ v + A(cov_x_xt @ At(v))
+            #cov_y_xt = lambda v: self.cov_y @ v + A(cov_x_xt @ At(v))
+            cov_y_xt = lambda v: self.cov_y @ v + cov_t * A(*vjp(At(v))) + 1e-6 * v # Tikhonov regularization
 
         b = self.y - y
         v, _ = self.solve(

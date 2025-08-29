@@ -357,6 +357,7 @@ def train(cfg: DictConfig, runid: str, lap: int, src: str):
 
         # Every 16 epochs, sample validation images and log to wandb
         if (epoch + 1) % cfg.training.sample_interval == 0:
+            t4b = time.time()
             sample_start = time.time()
             model = static(avrg, others)
             model.train(False)
@@ -396,6 +397,7 @@ def train(cfg: DictConfig, runid: str, lap: int, src: str):
                 # Single image case
                 log_dict['samples'] = wandb.Image(pil_images)
             run.log(log_dict)
+            jax.debug.print(f"[{time.strftime('%X')}] Generated example images in {time.time() - t4b:.2f} seconds")
             jax.debug.print(f"[{time.strftime('%X')}] Epoch {epoch+1}: train_loss={loss_train:.4f}, val_loss={loss_val:.4f}, epoch_time={time.time() - epoch_start:.2f}s, val_time={val_time:.2f}s, sample_time={time.time() - sample_start:.2f}s")
         else:
             run.log({
