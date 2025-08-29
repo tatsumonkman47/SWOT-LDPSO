@@ -46,16 +46,19 @@ CONFIG = {
     # Fit moments for prior Gaussian model
     'cov_y': 1e-4**2, # From 1e-3**2, Expected observation noise covariance, should match the actual noise level in the data
     'fit_moments_maxiter': 10,
-    # Diffusion sampling
+    # Diffusion sampling plus linear operator settings
     'sampler': 'ddpm',
     'sde': {'a': 1e-4, 'b': 1e2}, # Variance Exploding SDE parameters. 'a' is the noise level, 'b' is the diffusion coefficient.
     'heuristic': None,
     'discrete': 256,
-    'diff_maxiter': 2,
+    'diff_maxiter': 50,
+    'verbose': False,
+    'solver_method': 'bicgstab',
+    #'solver_method': 'cg',
     # Generation settings
     'generation_batch_size': 128,
     # Training settings
-    'epochs': 2,
+    'epochs': 256,
     'batch_size': 304,
     'scheduler': 'constant',
     'lr_init': 2e-4,
@@ -65,7 +68,81 @@ CONFIG = {
     'weight_decay': None,
     'clip': 1.0,
     'ema_decay': 0.9999,
+
+    # Scheduler settings
+    'max_jobs': 32,  # Total number of training laps (jobs) to schedule
+    'name': 'swot-sst-inpainting_V2',
 }
+
+CONFIG_TEST_1 = CONFIG.copy()
+CONFIG_TEST_1.update({
+    'epochs': 2,
+    'fit_moments_maxiter': 5,
+    'diff_maxiter': 5,
+    'solver_method': 'cg',
+    'verbose': True,
+    'name': 'cg_5-iter_short-test',
+    'max_jobs': 2,
+})
+
+CONFIG_TEST_2 = CONFIG.copy()
+CONFIG_TEST_2.update({
+    'epochs': 2,
+    'fit_moments_maxiter': 5,
+    'diff_maxiter': 5,
+    'solver_method': 'bicgstab',
+    'verbose': True,
+    'name': 'bicgstab_5-iter_short-test',
+    'max_jobs': 2,
+})
+
+CONFIG_TEST_3 = CONFIG.copy()
+CONFIG_TEST_3.update({
+    'epochs': 2,
+    'fit_moments_maxiter': 5,
+    'diff_maxiter': 50,
+    'solver_method': 'cg',
+    'verbose': False,
+    'name': 'cg_50-iter_short-test',
+    'max_jobs': 2,
+})
+
+CONFIG_TEST_4 = CONFIG.copy()
+CONFIG_TEST_4.update({
+    'epochs': 2,
+    'fit_moments_maxiter': 5,
+    'diff_maxiter': 50,
+    'solver_method': 'bicgstab',
+    'verbose': False,
+    'name': 'bicgstab_50-iter_short-test',
+    'max_jobs': 2,
+})
+
+CONFIG_TEST_5 = CONFIG.copy()
+CONFIG_TEST_5.update({
+    'epochs': 256,
+    'fit_moments_maxiter': 5,
+    'diff_maxiter': 50,
+    'solver_method': 'cg',
+    'verbose': False,
+    'name': 'cg_50-iter_long-test',
+    'max_jobs': 32,
+})
+
+CONFIG_TEST_6 = CONFIG.copy()
+CONFIG_TEST_6.update({
+    'epochs': 256,
+    'fit_moments_maxiter': 5,
+    'diff_maxiter': 50,
+    'solver_method': 'bicgstab',
+    'verbose': False,
+    'name': 'bicgstab_50-iter_long-test',
+    'max_jobs': 32,
+})
+
+CONFIGS = [CONFIG_TEST_1, CONFIG_TEST_2, CONFIG_TEST_3, CONFIG_TEST_4, CONFIG_TEST_5, CONFIG_TEST_6]
+CONFIG = CONFIGS[5]  # Change index to select different test configurations
+
 
 def zarr_batch_iterator(array, batch_size, indices=None, drop_last_batch=True):
     N = array.shape[0]
@@ -82,11 +159,7 @@ def zarr_generate(model, dataset, rng, batch_size, shape, num_gpus, **kwargs):
     # Force eval mode during generation
     original_training = getattr(model, 'training', True)
     # Set eval mode with proper RNG context
-    with inox_random.set_rng(
-        init=inox_random.PRNG(rng.split()),
-        dropout=inox_random.PRNG(rng.split()),
-    ):
-        model.train(False)
+    model.train(False)
     N = dataset['y'].shape[0]
     xs = []
     for start in (bar := trange(0, N, batch_size, desc="Generating batches", ncols=88)):
@@ -103,54 +176,15 @@ def zarr_generate(model, dataset, rng, batch_size, shape, num_gpus, **kwargs):
             A_batch = np.concatenate([A_batch, A_pad], axis=0)
         # Fresh RNG context for each batch
         batch_rng = rng.split()
-        with inox_random.set_rng(
-            init=inox_random.PRNG(batch_rng),
-            dropout=inox_random.PRNG(jax.random.split(batch_rng)[1]),
-        ):
-            x_batch = sample(model, y_batch, A_batch, jax.random.split(batch_rng)[0], **kwargs)
+        x_batch = sample(model, y_batch, A_batch, jax.random.split(batch_rng)[0], **kwargs)
         # Remove padding from output
         if current_batch_size % num_gpus != 0:
             x_batch = x_batch[:current_batch_size]
         xs.append(np.asarray(x_batch))
     xs = np.concatenate(xs, axis=0)
     # Restore original training mode with RNG context
-    with inox_random.set_rng(
-        init=inox_random.PRNG(rng.split()),
-        dropout=inox_random.PRNG(rng.split()),
-    ):
-        model.train(original_training)
+    model.train(original_training)
     return {'x': xs}
-
-
-def load_checkpoint_with_rng_context(checkpoint_path, C, init_rng, dropout_rng):
-    """Load checkpoint with proper RNG context management."""
-    # Clear global RNG state before loading
-    inox.random.INOX_RNG.clear()
-    with inox.random.set_rng(
-        init=init_rng,
-        dropout=dropout_rng,
-    ):
-        # Load the checkpoint
-        with open(checkpoint_path, 'rb') as f:
-            checkpoint_data = pickle.load(f)
-        # Create fresh model instance
-        previous = make_model(
-            key=init_rng.split(), 
-            in_channels=C, 
-            out_channels=C, 
-            **CONFIG
-        )
-        # Load saved parameters
-        previous.mu_x = checkpoint_data['mu_x']
-        if checkpoint_data.get('cov_x') is not None:
-            previous.cov_x = checkpoint_data['cov_x']
-        # Apply loaded parameters
-        static_part, _ = previous.partition()
-        previous = static_part(checkpoint_data['params'])
-        # Set to eval mode
-        previous.train(False)
-        return previous, checkpoint_data
-
 
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -171,9 +205,13 @@ def train(runid: int, lap: int, src: str):
             resume='never',  # Ensure fresh start for lap 0
             dir=PATH,
             config=CONFIG,
-            name=f'training_{runid}',
+            name=None,  # Let wandb generate the name first
             tags=['multi_lap_training', f'lap_{lap}']
         )
+        # Get the auto-generated name and modify it
+        auto_name = run.name
+        custom_name = f'{auto_name}_{CONFIG.get("name")}_{runid}'
+        run.name = custom_name
     else:
         # Subsequent laps - resume existing run
         run = wandb.init(
@@ -215,78 +253,69 @@ def train(runid: int, lap: int, src: str):
     init_rng = inox.random.PRNG(main_rng.split())
     dropout_rng = inox.random.PRNG(main_rng.split())
     sampling_rng = inox.random.PRNG(main_rng.split())
+
+    # Create the SDE object (Variance Exploding SDE)
+    sde = VESDE(**CONFIG.get('sde'))
     
-    # CRITICAL: Clear any existing global RNG state
-    # inox.random.INOX_RNG.clear()
+    #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    # Load HuggingFace-formatted LLC4320 dataset
+    t0 = time.time()
+    trainset_yA = zarr.open_group(f"{src}/train", mode="r")
+    testset_yA = zarr.open_group(f"{src}/train", mode="r")
+    #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    # Validation data (fixed samples)
+    y_eval, A_eval = testset_yA['y'][:16], testset_yA['A'][:16]
+    y_eval, A_eval = jax.device_put((y_eval, A_eval), distributed)
+    B, H, W, C = y_eval.shape
+    D = H * W * C
+    jax.debug.print(f"[{time.strftime('%X')}] Loaded dataset in {time.time() - t0:.2f} seconds")
 
-    # Set initial RNG context for model creation/loading
-    with inox.random.set_rng(
-        init=init_rng,
-        dropout=dropout_rng,
-    ):
-        # Create the SDE object (Variance Exploding SDE)
-        sde = VESDE(**CONFIG.get('sde'))
-        
-        #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-        # Load HuggingFace-formatted LLC4320 dataset
-        t0 = time.time()
-        trainset_yA = zarr.open_group(f"{src}/train", mode="r")
-        testset_yA = zarr.open_group(f"{src}/train", mode="r")
-        #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-        # Validation data (fixed samples)
-        y_eval, A_eval = testset_yA['y'][:16], testset_yA['A'][:16]
-        y_eval, A_eval = jax.device_put((y_eval, A_eval), distributed)
-        B, H, W, C = y_eval.shape
+    # If lap >0, load previous checkpoint, else fit prior Gaussian model
+    t1 = time.time()
+    # Usage in your main training function:
+    if lap > 0:
+        checkpoint_path = runpath / f'checkpoint_lap{lap-1:02d}.pkl'
+        # Load checkpoint
+        with open(checkpoint_path, 'rb') as f:
+            checkpoint_data = pickle.load(f)
+        # Create model once
+        model = make_model(key=init_rng.split(), in_channels=C, out_channels=C, **CONFIG)
+        # Load parameters
+        model.mu_x = checkpoint_data['mu_x']
+        if checkpoint_data.get('cov_x') is not None:
+            model.cov_x = checkpoint_data['cov_x']
+        static_part, _ = model.partition()
+        model = static_part(checkpoint_data['params'])
+        model.train(False)
+        # REUSE the same model instance for generation AND training
+        previous = model
+        print(f"[{time.strftime('%X')}] Model loaded successfully from lap {lap-1}")
+
+    else:
+        y_fit, A_fit = trainset_yA['y'][:16384], trainset_yA['A'][:16384]
+        y_fit, A_fit = jax.device_put((y_fit, A_fit), distributed)
+        jax.debug.print(f"[{time.strftime('%X')}] Loaded fitting dataset in {time.time() - t0:.2f} seconds")
+        B, H, W, C = y_fit.shape
         D = H * W * C
-        jax.debug.print(f"[{time.strftime('%X')}] Loaded dataset in {time.time() - t0:.2f} seconds")
-
-        # If lap >0, load previous checkpoint, else fit prior Gaussian model
-        t1 = time.time()
-        # Usage in your main training function:
-        if lap > 0:
-            checkpoint_path = runpath / f'checkpoint_{lap - 1}.pkl'
-            # REMOVE the extra RNG creation and nested context
-            # Instead, use the existing RNG context directly
-            with open(checkpoint_path, 'rb') as f:
-                checkpoint_data = pickle.load(f)
-            previous = make_model(
-                key=init_rng.split(), 
-                in_channels=C, 
-                out_channels=C, 
-                **CONFIG
-            )
-            previous.mu_x = checkpoint_data['mu_x']
-            if checkpoint_data.get('cov_x') is not None:
-                previous.cov_x = checkpoint_data['cov_x']
-            static_part, _ = previous.partition()
-            previous = static_part(checkpoint_data['params'])
-            previous.train(False)
-            print(f"[{time.strftime('%X')}] Model loaded successfully from lap {lap-1}")
-
-        else:
-            y_fit, A_fit = trainset_yA['y'][:16384], trainset_yA['A'][:16384]
-            y_fit, A_fit = jax.device_put((y_fit, A_fit), distributed)
-            jax.debug.print(f"[{time.strftime('%X')}] Loaded fitting dataset in {time.time() - t0:.2f} seconds")
-            B, H, W, C = y_fit.shape
-            D = H * W * C
-            t1a = time.time()
-            mu_x, cov_x = fit_moments(
-                features=D, # The dimensionality of the latent variable x
-                rank=320, # This is the low-rank dimension of your approximate posterior or prior covariance matrix
-                shard=True,
-                A=inox.tree.Partial(measure, A_fit, H=H, W=W, C=C),
-                y=flatten(y_fit),
-                cov_y=CONFIG.get('cov_y', 1e-3**2), # Expected observation noise covariance
-                sampler='ddim',
-                sde=sde,
-                steps=256,
-                maxiter=CONFIG.get('fit_moments_maxiter',10), # Increased for robustness
-                key=main_rng.split(),
-            )
-            jax.debug.print(f"[{time.strftime('%X')}] fit_moments completed in {time.time() - t1a:.2f} seconds")
-            del y_fit, A_fit
-            previous = GaussianDenoiser(mu_x, cov_x)
-            jax.debug.print(f"[{time.strftime('%X')}] GaussianDenoiser created in {time.time() - t1:.2f} seconds")
+        t1a = time.time()
+        mu_x, cov_x = fit_moments(
+            features=D, # The dimensionality of the latent variable x
+            rank=320, # This is the low-rank dimension of your approximate posterior or prior covariance matrix
+            shard=True,
+            A=inox.tree.Partial(measure, A_fit, H=H, W=W, C=C),
+            y=flatten(y_fit),
+            cov_y=CONFIG.get('cov_y', 1e-3**2), # Expected observation noise covariance
+            sampler='ddim',
+            sde=sde,
+            steps=256,
+            maxiter=CONFIG.get('fit_moments_maxiter',10), # Increased for robustness
+            key=main_rng.split(),
+            method=CONFIG.get('solver_method','cg'),
+        )
+        jax.debug.print(f"[{time.strftime('%X')}] fit_moments completed in {time.time() - t1a:.2f} seconds")
+        del y_fit, A_fit
+        previous = GaussianDenoiser(mu_x, cov_x)
+        jax.debug.print(f"[{time.strftime('%X')}] GaussianDenoiser created in {time.time() - t1:.2f} seconds")
 
     # Prepare the previous model for sampling new training targets
     t2 = time.time()
@@ -310,6 +339,8 @@ def train(runid: int, lap: int, src: str):
         sde=sde,
         steps=config.discrete,
         maxiter=config.diff_maxiter,
+        verbose=config.verbose,
+        method=CONFIG.get('solver_method','cg'),
     )
     print(f"[{time.strftime('%X')}] Generated trainset in {time.time() - t3:.2f} seconds")
     t3b = time.time()
@@ -325,6 +356,8 @@ def train(runid: int, lap: int, src: str):
         sde=sde,
         steps=config.discrete,
         maxiter=config.diff_maxiter,
+        verbose=config.verbose,
+        method=CONFIG.get('solver_method','cg'),
     )
     jax.debug.print(f"[{time.strftime('%X')}] Generated testset in {time.time() - t3b:.2f} seconds")
 
@@ -343,11 +376,11 @@ def train(runid: int, lap: int, src: str):
         model = previous
     else:
         model = make_model(key=main_rng.split(), in_channels=C, out_channels=C, **CONFIG)
+    model.train(True)
     print(f"[{time.strftime('%X')}] Model initialized in {time.time() - t5:.2f} seconds")
 
     # Set model's prior mean
     model.mu_x = mu_x
-
     # Configure model's covariance heuristic
     if config.heuristic == 'zeros':
         model.cov_x = jnp.zeros_like(mu_x)
@@ -358,7 +391,6 @@ def train(runid: int, lap: int, src: str):
     elif config.heuristic == 'cov_x':
         model.cov_x = cov_x
 
-    model.train(True)
     # Partition model parameters
     static, params, others = model.partition(nn.Parameter)
     # Define denoising loss
@@ -419,7 +451,6 @@ def train(runid: int, lap: int, src: str):
             assert x_batch is not None, "x_batch is None!"
             x_batch = jax.device_put(x_batch, distributed)
             x_batch = flatten(x_batch)
-            #with inox_random.set_rng(init=inox_random.PRNG(rng.split()), dropout=inox_random.PRNG(rng.split())):
             loss, avrg, params, opt_state = sgd_step(avrg, params, others, opt_state, x_batch, key=main_rng.split())
             losses.append(loss)
         loss_train = np.stack(losses).mean()
@@ -449,7 +480,7 @@ def train(runid: int, lap: int, src: str):
                 shard=True,
                 sampler=config.sampler,
                 steps=config.discrete,
-                maxiter=config.maxiter,
+                maxiter=config.diff_maxiter,
             )
             model.train(True)  # Restore training mode if continuing to train
             num = x.shape[0]
@@ -504,7 +535,7 @@ def train(runid: int, lap: int, src: str):
         'lap': lap,
         'config': dict(CONFIG),  # Save config for reconstruction
     }
-    with open(runpath / f'checkpoint_{lap}.pkl', 'wb') as f:
+    with open(runpath / f'checkpoint_lap{lap:02d}.pkl', 'wb') as f:
         pickle.dump(checkpoint_data, f)
     """
     dump_module(model, runpath / f'checkpoint_{lap}.pkl')
@@ -541,7 +572,7 @@ if __name__ == '__main__':
     if dry_run:
         jobs = jobs[:1]
     if dry_run_scheduler:
-        jobs = jobs[:2]
+        jobs = jobs[:CONFIG.get('max_jobs',32)]
 
     # Add debug prints to see what DAWGZ is actually doing
     print(f"DAWGZ DEBUG: Created {len(jobs)} jobs")

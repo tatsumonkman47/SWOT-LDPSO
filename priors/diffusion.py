@@ -352,8 +352,24 @@ class PosteriorDenoiser(nn.Module):
             maxiter=self.maxiter,
         )
 
+        # JAX-compatible conditional debugging
         if self.verbose:
-            jax.debug.print('{},{}', sigma_t, jnp.linalg.norm(cov_y_xt(v) - b))
+            residual = jnp.linalg.norm(cov_y_xt(v) - b)
+            v_norm = jnp.linalg.norm(v)
+            # Always print basic info
+            #jax.debug.print("CG Debug: maxiter={}, residual={}, v_norm={}, sigma_t={}", 
+            #                self.maxiter, residual, v_norm, sigma_t)
+            # Use jax.lax.cond for conditional warnings
+            jax.lax.cond(
+                jnp.any(jnp.isnan(v)) | jnp.any(jnp.isinf(v)),
+                lambda: jax.debug.print("WARNING: CG returned NaN/Inf values!"),
+                lambda: None
+            )
+            jax.lax.cond(
+                v_norm > 1e6,
+                lambda: jax.debug.print("WARNING: CG solution has extreme magnitude!"),
+                lambda: None
+            )
 
         (score,) = vjp(At(v))
 
