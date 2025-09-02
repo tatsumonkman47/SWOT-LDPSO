@@ -229,6 +229,7 @@ def train(cfg: DictConfig, runid: str, lap: int, src: str):
         maxiter=cfg.generate.diff_maxiter,
         verbose=cfg.generate.verbose,
         method=cfg.generate.method,
+        cov_y=cfg.training.cov_y,
     )
     print(f"[{time.strftime('%X')}] Generated trainset in {time.time() - t3:.2f} seconds")
     t3b = time.time()
@@ -246,6 +247,7 @@ def train(cfg: DictConfig, runid: str, lap: int, src: str):
         maxiter=cfg.generate.diff_maxiter,
         verbose=cfg.generate.verbose,
         method=cfg.generate.method,
+        cov_y=cfg.training.cov_y,
     )
     jax.debug.print(f"[{time.strftime('%X')}] Generated testset in {time.time() - t3b:.2f} seconds")
 
@@ -367,7 +369,7 @@ def train(cfg: DictConfig, runid: str, lap: int, src: str):
                 A=A_eval,
                 key=main_rng.split(),
                 shard=True,
-                sampler=cfg.generate.name,
+                sampler=cfg.generate.sampler,
                 steps=cfg.generate.discrete,
                 maxiter=cfg.generate.diff_maxiter,
             )

@@ -327,53 +327,58 @@ class PosteriorDenoiser(nn.Module):
             self.solve = jax.scipy.sparse.linalg.cg
         elif method == 'bicgstab':
             self.solve = jax.scipy.sparse.linalg.bicgstab
+        self.method = method
 
         self.verbose = verbose
+        self.fallback_count = 0  # This is outside JIT context
 
     @inox.jit
     def __call__(self, xt: Array, sigma_t: Array, key: Array = None) -> Array:
-        
         cov_t = sigma_t[..., None] ** 2
 
         x, vjp = jax.vjp(lambda xt: self.model(xt, sigma_t, key), xt)
         y, A = jax.linearize(self.A, x)
         At = transpose(A, x)
 
+        # Adaptive regularization that scales with noise level
+        reg_factor = jnp.maximum(1e-6, 1e-5 * jnp.mean(sigma_t**2))
+        
         if self.cov_x is None:
-            #cov_y_xt = lambda v: self.cov_y @ v + cov_t * A(*vjp(At(v)))
-            cov_y_xt = lambda v: self.cov_y @ v + cov_t * A(*vjp(At(v))) + 1e-6 * v # Tikhonov regularization
+            cov_y_xt = lambda v: self.cov_y @ v + cov_t * A(*vjp(At(v))) + reg_factor * v
         else:
             cov_x_xt = cov_t + (-(cov_t**2)) * (self.cov_x + cov_t).inv
-            #cov_y_xt = lambda v: self.cov_y @ v + A(cov_x_xt @ At(v))
-            cov_y_xt = lambda v: self.cov_y @ v + cov_t * A(*vjp(At(v))) + 1e-6 * v # Tikhonov regularization
-
+            cov_y_xt = lambda v: self.cov_y @ v + A(cov_x_xt @ At(v)) + reg_factor * v  # Use cov_x_xt here
+        
         b = self.y - y
-        v, _ = self.solve(
+        
+        # Standard CG solve
+        v, info = self.solve(
             A=cov_y_xt,
             b=b,
             tol=self.rtol,
             maxiter=self.maxiter,
         )
+        
+        # Fallback for numerical issues using JAX-compatible conditionals
+        has_numerical_issue = jnp.any(jnp.isnan(v)) | jnp.any(jnp.isinf(v)) | (jnp.linalg.norm(v) > 1e6)
+        simple_v = b / (jnp.mean(self.cov_y.diag()) + jnp.mean(cov_t) + reg_factor)
+        v = jax.lax.cond(has_numerical_issue, lambda _: simple_v, lambda _: v, None)
 
         # JAX-compatible conditional debugging
         if self.verbose:
             residual = jnp.linalg.norm(cov_y_xt(v) - b)
             v_norm = jnp.linalg.norm(v)
-            # Always print basic info
-            #jax.debug.print("CG Debug: maxiter={}, residual={}, v_norm={}, sigma_t={}", 
-            #                self.maxiter, residual, v_norm, sigma_t)
-            # Use jax.lax.cond for conditional warnings
+            
+            # Print diagnostics
+            jax.debug.print("{} solver stats: sigma_t={}, residual={}, v_norm={}, fallback={}", 
+                           self.method, jnp.mean(sigma_t), residual, v_norm, has_numerical_issue)
+                            
+            # Print warnings
             jax.lax.cond(
-                jnp.any(jnp.isnan(v)) | jnp.any(jnp.isinf(v)),
-                lambda: jax.debug.print("WARNING: CG returned NaN/Inf values!"),
-                lambda: None
-            )
-            jax.lax.cond(
-                v_norm > 1e6,
-                lambda: jax.debug.print("WARNING: CG solution has extreme magnitude!"),
+                has_numerical_issue,
+                lambda: jax.debug.print("WARNING: CG solution required fallback!"),
                 lambda: None
             )
 
         (score,) = vjp(At(v))
-
         return x + cov_t * score

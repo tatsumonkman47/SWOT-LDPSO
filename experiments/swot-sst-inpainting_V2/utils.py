@@ -35,6 +35,7 @@ def sample(
     A: Array,
     key: Array,
     shard: bool = False,
+    cov_y: float =1e-3**2,
     **kwargs,
 ) -> Array:
     if shard:
@@ -60,7 +61,7 @@ def sample(
             shard=shard,
             A=inox.tree.Partial(measure, A, H=H, W=W, C=C),
             y=flatten(y),
-            cov_y=1e-3**2,
+            cov_y=cov_y,
             key=key3,
             **kwargs,
         )

@@ -7,13 +7,13 @@ training:
 
 # Generator settings
 generate:
-  method: bicgstab #bicgstab
-  sampler: ddpm
+  method: cg #bicgstab
+  sampler: ddim
   discrete: 256
-  diff_maxiter: 1
-  verbose: false
-  batch_size: 128
+  diff_maxiter: 3
+  batch_size: 256
+  verbose: True
 
 slurm:
-  name: 002_bigcstab_1-iter_test
+  name: 002_cg_1-iter_ddim_test
   max_jobs: 2

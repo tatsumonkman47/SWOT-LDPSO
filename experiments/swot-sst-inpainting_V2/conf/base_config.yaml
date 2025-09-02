@@ -20,7 +20,7 @@ model:
 training:
   epochs: 256
   batch_size: 304
-  cov_y: 1e-8  # From 1e-4**2
+  cov_y: 1e-6  # From 1e-4**2
   fit_moments_maxiter: 10
   fit_moments_method: cg
   ema_decay: 0.9999
@@ -42,7 +42,7 @@ generate:
   method: cg #bicgstab
   diff_maxiter: 5
   verbose: false
-  sampler: ddpm
+  sampler: ddim
   discrete: 256
   batch_size: 128
 
