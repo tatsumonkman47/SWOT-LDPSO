@@ -347,13 +347,13 @@ class PosteriorDenoiser(nn.Module):
         min_reg = 1e-5  # Minimum regularization floor
         base_reg = 1e-8  # Base regularization coefficient
         inverse_scale = base_reg / jnp.maximum(jnp.mean(sigma_t), 1e-12)  # Prevent division by zero
-        reg_factor = jnp.maximum(min_reg, inverse_scale)
+        reg_factor = jnp.maximum(min_reg, inverse_scale) # Remove if testing fallback or pure CG-method
         
         if self.cov_x is None:
-            cov_y_xt = lambda v: self.cov_y @ v + cov_t * A(*vjp(At(v))) + reg_factor * v
+            cov_y_xt = lambda v: self.cov_y @ v + cov_t * A(*vjp(At(v))) + reg_factor * v 
         else:
             cov_x_xt = cov_t + (-(cov_t**2)) * (self.cov_x + cov_t).inv
-            cov_y_xt = lambda v: self.cov_y @ v + A(cov_x_xt @ At(v)) + reg_factor * v  # Use cov_x_xt here
+            cov_y_xt = lambda v: self.cov_y @ v + A(cov_x_xt @ At(v)) + reg_factor * v  
         
         b = self.y - y
         
@@ -364,11 +364,12 @@ class PosteriorDenoiser(nn.Module):
             tol=self.rtol,
             maxiter=self.maxiter,
         )
-        """
+        """ #Old fallback example and verbose logging
+
         # Fallback for numerical issues using JAX-compatible conditionals
         has_numerical_issue = jnp.any(jnp.isnan(v)) | jnp.any(jnp.isinf(v)) | (jnp.linalg.norm(v) > 1e6)
-        simple_v = b / (jnp.mean(self.cov_y.diag()) + jnp.mean(cov_t) + reg_factor)
-        v = jax.lax.cond(has_numerical_issue, lambda _: simple_v, lambda _: v, None)
+        #simple_v = b / (jnp.mean(self.cov_y.diag()) + jnp.mean(cov_t) + reg_factor)
+        #v = jax.lax.cond(has_numerical_issue, lambda _: simple_v, lambda _: v, None)
         # JAX-compatible conditional debugging
         if self.verbose:
             residual = jnp.linalg.norm(cov_y_xt(v) - b)

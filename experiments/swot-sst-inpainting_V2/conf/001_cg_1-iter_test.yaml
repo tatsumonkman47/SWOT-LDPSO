@@ -11,7 +11,7 @@ generate:
   sampler: ddim
   discrete: 64
   diff_maxiter: 2
-  batch_size: 128
+  batch_size: 512
   verbose: False
 
 slurm:

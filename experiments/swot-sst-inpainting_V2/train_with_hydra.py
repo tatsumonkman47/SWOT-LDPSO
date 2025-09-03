@@ -26,7 +26,6 @@ from priors.common import dump_module, ppca, fit_moments, load_module
 from priors.optim import Adam, EMA
 
 from functools import partial
-import tqdm
 from tqdm import trange
 from typing import Dict, List, Tuple, Optional, Union, Any, Callable
 from utils import make_model, sample, measure, PATH          # Assumed utility functions (augmentations, flatten, sampling, etc.)
@@ -47,35 +46,44 @@ def zarr_generate(model, dataset, rng, batch_size, shape, num_gpus, **kwargs):
     """Generate outputs for a dataset (Zarr or dict of arrays) in batches."""
     # Force eval mode during generation
     original_training = getattr(model, 'training', True)
-    # Set eval mode with proper RNG context
     model.train(False)
     N = dataset['y'].shape[0]
 
-    # Pre-compile by running on a small batch
-    _ = sample(model, dataset['y'][:4], dataset['A'][:4], jax.random.split(rng.split())[0], **kwargs)
+    # Create a batched sample function using vmap
+    @partial(jax.jit, static_argnums=(0,))
+    def sample_batch(model_fn, y_batch, A_batch, key_batch):
+        return jax.vmap(lambda y, A, k: sample(model_fn, y, A, k, **kwargs))(
+            y_batch, A_batch, key_batch)
+    
+    # Pre-compile on a small batch
+    _ = sample_batch(model, dataset['y'][:16], dataset['A'][:16], 
+                     jax.random.split(rng.split(), 16))
+    
+    # Make batch size a multiple of GPU count for better utilization
+    adjusted_batch_size = (batch_size // num_gpus) * num_gpus
+    if adjusted_batch_size != batch_size:
+        print(f"Adjusting batch size from {batch_size} to {adjusted_batch_size} for GPU efficiency")
+        batch_size = adjusted_batch_size
     
     xs = []
     for start in (bar := trange(0, N, batch_size, desc="Generating batches", ncols=88)):
         end = min(start + batch_size, N)
         current_batch_size = end - start
+        # Extract data for this batch
         y_batch = dataset['y'][start:end]
         A_batch = dataset['A'][start:end]
-        # Pad to make divisible by num_gpus if needed
-        if current_batch_size % num_gpus != 0:
-            pad_size = num_gpus - (current_batch_size % num_gpus)
-            y_batch = jnp.pad(y_batch, ((0, pad_size), (0, 0), (0, 0), (0, 0)), mode='edge')
-            A_batch = jnp.pad(A_batch, ((0, pad_size), (0, 0), (0, 0), (0, 0)), mode='edge')
-        # Fresh RNG context for each batch
-        y_batch, A_batch = jax.device_put((y_batch, A_batch))
-        batch_key = jax.random.split(rng.split())[0]
-        x_batch = sample(model, y_batch, A_batch, batch_key, **kwargs)
-        # Remove padding from output
-        if current_batch_size % num_gpus != 0:
-            x_batch = x_batch[:current_batch_size]
+        # Generate separate keys for each sample
+        batch_keys = jax.random.split(rng.split(), current_batch_size)
+        # Put data on devices in a sharded manner
+        y_batch = jax.device_put(y_batch)
+        A_batch = jax.device_put(A_batch)
+        # Execute the batch sampling
+        x_batch = sample_batch(model, y_batch, A_batch, batch_keys)
+        # Move results back to host memory
         xs.append(np.asarray(x_batch))
-
+        
+    # Combine all batches
     xs = np.concatenate(xs, axis=0)
-    # Restore original training mode with RNG context
     model.train(original_training)
     return {'x': xs}
 
