@@ -341,7 +341,13 @@ class PosteriorDenoiser(nn.Module):
         At = transpose(A, x)
 
         # Adaptive regularization that scales with noise level
-        reg_factor = jnp.maximum(1e-6, 1e-5 * jnp.mean(sigma_t**2))
+        #reg_factor = jnp.maximum(1e-6, 1e-5 * jnp.mean(sigma_t**2))
+
+        # Adaptive regularization that scales inversely with noise level
+        min_reg = 1e-5  # Minimum regularization floor
+        base_reg = 1e-8  # Base regularization coefficient
+        inverse_scale = base_reg / jnp.maximum(jnp.mean(sigma_t), 1e-12)  # Prevent division by zero
+        reg_factor = jnp.maximum(min_reg, inverse_scale)
         
         if self.cov_x is None:
             cov_y_xt = lambda v: self.cov_y @ v + cov_t * A(*vjp(At(v))) + reg_factor * v
@@ -358,27 +364,24 @@ class PosteriorDenoiser(nn.Module):
             tol=self.rtol,
             maxiter=self.maxiter,
         )
-        
+        """
         # Fallback for numerical issues using JAX-compatible conditionals
         has_numerical_issue = jnp.any(jnp.isnan(v)) | jnp.any(jnp.isinf(v)) | (jnp.linalg.norm(v) > 1e6)
         simple_v = b / (jnp.mean(self.cov_y.diag()) + jnp.mean(cov_t) + reg_factor)
         v = jax.lax.cond(has_numerical_issue, lambda _: simple_v, lambda _: v, None)
-
         # JAX-compatible conditional debugging
         if self.verbose:
             residual = jnp.linalg.norm(cov_y_xt(v) - b)
             v_norm = jnp.linalg.norm(v)
-            
             # Print diagnostics
             jax.debug.print("{} solver stats: sigma_t={}, residual={}, v_norm={}, fallback={}", 
-                           self.method, jnp.mean(sigma_t), residual, v_norm, has_numerical_issue)
-                            
+                           self.method, jnp.mean(sigma_t), residual, v_norm, has_numerical_issue)   
             # Print warnings
             jax.lax.cond(
                 has_numerical_issue,
                 lambda: jax.debug.print("WARNING: CG solution required fallback!"),
                 lambda: None
             )
-
+        """
         (score,) = vjp(At(v))
         return x + cov_t * score

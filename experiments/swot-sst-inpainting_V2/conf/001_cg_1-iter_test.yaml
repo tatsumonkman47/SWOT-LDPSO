@@ -8,11 +8,11 @@ training:
 # Generator settings
 generate:
   method: cg #bicgstab
-  sampler: ddpm
-  discrete: 256
-  diff_maxiter: 3
-  batch_size: 256
-  verbose: True
+  sampler: ddim
+  discrete: 64
+  diff_maxiter: 2
+  batch_size: 128
+  verbose: False
 
 slurm:
   name: 001_cg_1-iter_test

@@ -50,6 +50,10 @@ def zarr_generate(model, dataset, rng, batch_size, shape, num_gpus, **kwargs):
     # Set eval mode with proper RNG context
     model.train(False)
     N = dataset['y'].shape[0]
+
+    # Pre-compile by running on a small batch
+    _ = sample(model, dataset['y'][:4], dataset['A'][:4], jax.random.split(rng.split())[0], **kwargs)
+    
     xs = []
     for start in (bar := trange(0, N, batch_size, desc="Generating batches", ncols=88)):
         end = min(start + batch_size, N)
@@ -59,17 +63,17 @@ def zarr_generate(model, dataset, rng, batch_size, shape, num_gpus, **kwargs):
         # Pad to make divisible by num_gpus if needed
         if current_batch_size % num_gpus != 0:
             pad_size = num_gpus - (current_batch_size % num_gpus)
-            y_pad = np.repeat(y_batch[-1:], pad_size, axis=0)
-            A_pad = np.repeat(A_batch[-1:], pad_size, axis=0)
-            y_batch = np.concatenate([y_batch, y_pad], axis=0)
-            A_batch = np.concatenate([A_batch, A_pad], axis=0)
+            y_batch = jnp.pad(y_batch, ((0, pad_size), (0, 0), (0, 0), (0, 0)), mode='edge')
+            A_batch = jnp.pad(A_batch, ((0, pad_size), (0, 0), (0, 0), (0, 0)), mode='edge')
         # Fresh RNG context for each batch
-        batch_rng = rng.split()
-        x_batch = sample(model, y_batch, A_batch, jax.random.split(batch_rng)[0], **kwargs)
+        y_batch, A_batch = jax.device_put((y_batch, A_batch))
+        batch_key = jax.random.split(rng.split())[0]
+        x_batch = sample(model, y_batch, A_batch, batch_key, **kwargs)
         # Remove padding from output
         if current_batch_size % num_gpus != 0:
             x_batch = x_batch[:current_batch_size]
         xs.append(np.asarray(x_batch))
+
     xs = np.concatenate(xs, axis=0)
     # Restore original training mode with RNG context
     model.train(original_training)
